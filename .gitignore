@@ -1,1 +1,40 @@
+# Python caches and local tooling state
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.nox/
+.tox/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# Generated numerical data and binary artifacts
+*.npz
+*.npy
+*.pkl
+*.pickle
+*.h5
+*.hdf5
+*.mat
+*.parquet
+
+# Generated logs and run summaries
+*.log
+*.jsonl
+
+# Generated run/output directories. Keep source/demo/test directories tracked.
+outputs/
+output/
+output_plots/
+runs/
+results/
+checkpoints/
+workflow_dataset/
+mpi_dataset/
+
+# Chinese prompt/report drafts; keep the English/body files tracked.
 *_zhcn*

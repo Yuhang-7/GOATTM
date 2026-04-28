@@ -22,6 +22,7 @@ The new library should still be centered around:
 - goal-oriented reduced modeling,
 - learning latent reduced dynamics,
 - learning a QoI decoder,
+- evolving a latent state through a controlled latent ODE,
 - fitting QoI trajectories rather than full-state trajectories,
 - solving the decoder through a structured least-squares / normal-equation step inside training,
 - and supporting high-performance execution.
@@ -75,6 +76,25 @@ The first phase should prioritize:
 - preservation of performance hooks,
 - preservation of distributed execution hooks,
 - and a stable main training path.
+
+
+### Development Workflow Rule
+
+The repository now includes a `module_test` directory.
+
+Its purpose is:
+
+- to host small, focused module experiments,
+- to validate interfaces, kernels, data utilities, or solver ideas in isolation,
+- and to provide a staging area before code is promoted into `src`.
+
+The intended workflow is:
+
+1. New ideas, small prototypes, and modular tests should be developed in `module_test`.
+2. Once the module behavior is understood and the interface is judged acceptable, the corresponding implementation can be migrated into `src`.
+3. `src` should preferentially contain code that has already passed this smaller-scale design and behavior check.
+
+This rule is meant to reduce the chance that exploratory or unstable code gets mixed too early into the main source tree.
 
 
 ### Explicit Non-Goals for the First Phase
@@ -149,6 +169,24 @@ The rewrite should preserve the separation between:
 - the latent reduced dynamics model,
 - and the QoI decoder.
 
+More concretely, the latent framework should preserve the old GOAM structure
+
+- latent dynamics:
+  `du/dt = A u + H(u, u) + B p(t) + c`
+- QoI decoder:
+  `q = V1 u + V2(u \otimes u) + v0`
+
+Important implementation notes:
+
+- `H` should be parameterized through the energy-preserving `mu_H` representation rather than optimized as an unconstrained raw tensor.
+- The `Bp(t)` term is optional at runtime.
+- If `B` is not provided, that term is skipped.
+- If `p(t)` is not provided for a given solve, that term is also skipped.
+- The decoder should remain a distinct object from the latent dynamics, even if both use compressed quadratic features internally.
+- When `mu_g` is fixed and the decoder block `mu_f` is recovered by least squares / normal equations, that assembly should be treated as a distributed operation if MPI is active.
+- In particular, the decoder normal matrix and decoder right-hand side may need MPI reductions across ranks, because different training samples can be owned by different workers.
+- The rewrite should therefore not hard-code decoder recovery as a purely local single-process assembly, even if a serial fallback exists.
+
 The rewrite should also preserve the core training idea:
 
 - treat the dynamic model as the outer optimization object,
@@ -156,6 +194,59 @@ The rewrite should also preserve the core training idea:
 - then evaluate the QoI-based loss.
 
 This structural idea is one of the most valuable aspects of the old library and should remain central.
+
+
+### Parameterization and Loss Block
+
+The rewrite should make the parameterization choices explicit rather than leaving them implicit inside solver code.
+
+For the latent dynamics block, the intended parameterization is:
+
+- `A = -S S^T + W`
+- `S` is upper triangular
+- `W` is skew-symmetric
+- `H` is parameterized through `mu_H`
+- `B` is parameterized directly by its matrix entries
+- `c` is parameterized directly by its vector entries
+
+For the decoder block, the intended parameterization is:
+
+- `V1` is parameterized directly by its matrix entries
+- `V2` is parameterized directly by its compressed quadratic matrix entries
+- `v0` is parameterized directly by its vector entries
+
+The point of the `A = -S S^T + W` and `mu_H` parameterizations is not just storage convenience.
+These parameterizations relax structural constraints into an unconstrained optimization problem over free parameters.
+
+In particular:
+
+- `mu_H` replaces constrained optimization over raw energy-preserving quadratic tensors
+- `(S, W)` replaces constrained optimization over the stabilized linear operator `A`
+
+The rewrite should therefore treat these parameterizations as part of the mathematical model, not just as implementation details.
+
+For loss evaluation, the first phase should support the following setting:
+
+- the observed QoI trajectory is known,
+- the current dynamics and decoder parameters are known,
+- the forward latent trajectory is computed,
+- the QoI trajectory is decoded,
+- and the QoI misfit loss is evaluated on that discrete trajectory.
+
+At this stage, when computing derivatives, we should explicitly distinguish two notions:
+
+- direct partial derivatives with respect to `mu_f = (V1, V2, v0)` and `mu_g = (S, W, mu_H, B, c)`
+- the more complicated reduced derivative that accounts for `mu_f` being an implicit function of `mu_g`
+
+For now, the rewrite only needs the first one.
+That is:
+
+- compute the loss,
+- compute the decoder-side derivatives with respect to `V1`, `V2`, and `v0`,
+- compute the dynamics-side derivatives with respect to `S`, `W`, `mu_H`, `B`, and `c`,
+- but do **not yet** fold in the `mu_f(mu_g)` dependence from the decoder normal-equation solve.
+
+This distinction should remain explicit in the architecture and documentation, because later optimizer logic will rely on it.
 
 
 ### Solver Layer Direction
