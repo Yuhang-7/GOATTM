@@ -1,0 +1,246 @@
+Abort(809626127) on node 107: Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)......: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffe6b2ad0a8) failed
+MPII_Init_thread(282).........: 
+MPIR_init_comm_world(34)......: 
+MPIR_Comm_commit(794).........: 
+MPIR_Comm_commit_internal(579): 
+MPID_Comm_commit_pre_hook(151): 
+MPIDI_world_pre_init(669).....: 
+MPIDI_UCX_init_world(278).....: 
+initial_address_exchange(121).:  ucx function returned with failed status(ucx_init.c 121 initial_address_exchange Input/output error)
+Abort(71428623) on node 182: Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)......: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffe9b9cf178) failed
+MPII_Init_thread(282).........: 
+MPIR_init_comm_world(34)......: 
+MPIR_Comm_commit(794).........: 
+MPIR_Comm_commit_internal(579): 
+MPID_Comm_commit_pre_hook(151): 
+MPIDI_world_pre_init(669).....: 
+MPIDI_UCX_init_world(278).....: 
+initial_address_exchange(121).:  ucx function returned with failed status(ucx_init.c 121 initial_address_exchange Input/output error)
+Abort(474081807) on node 15: Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)......: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffe382f8008) failed
+MPII_Init_thread(282).........: 
+MPIR_init_comm_world(34)......: 
+MPIR_Comm_commit(794).........: 
+MPIR_Comm_commit_internal(579): 
+MPID_Comm_commit_pre_hook(151): 
+MPIDI_world_pre_init(669).....: 
+MPIDI_UCX_init_world(278).....: 
+initial_address_exchange(121).:  ucx function returned with failed status(ucx_init.c 121 initial_address_exchange Input/output error)
+Abort(943843855) on node 110: Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)......: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffc56736458) failed
+MPII_Init_thread(282).........: 
+MPIR_init_comm_world(34)......: 
+MPIR_Comm_commit(794).........: 
+MPIR_Comm_commit_internal(579): 
+MPID_Comm_commit_pre_hook(151): 
+MPIDI_world_pre_init(669).....: 
+MPIDI_UCX_init_world(278).....: 
+initial_address_exchange(121).:  ucx function returned with failed status(ucx_init.c 121 initial_address_exchange Input/output error)
+Abort(742517263) on node 191: Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)......: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffd9c064e58) failed
+MPII_Init_thread(282).........: 
+MPIR_init_comm_world(34)......: 
+MPIR_Comm_commit(794).........: 
+MPIR_Comm_commit_internal(579): 
+MPID_Comm_commit_pre_hook(151): 
+MPIDI_world_pre_init(669).....: 
+MPIDI_UCX_init_world(278).....: 
+initial_address_exchange(121).:  ucx function returned with failed status(ucx_init.c 121 initial_address_exchange Input/output error)
+Abort(138537487) on node 125: Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)......: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffd88a0db08) failed
+MPII_Init_thread(282).........: 
+MPIR_init_comm_world(34)......: 
+MPIR_Comm_commit(794).........: 
+MPIR_Comm_commit_internal(579): 
+MPID_Comm_commit_pre_hook(151): 
+MPIDI_world_pre_init(669).....: 
+MPIDI_UCX_init_world(278).....: 
+initial_address_exchange(121).:  ucx function returned with failed status(ucx_init.c 121 initial_address_exchange Input/output error)
+Abort(205646351) on node 174: Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)......: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffea26a56b8) failed
+MPII_Init_thread(282).........: 
+MPIR_init_comm_world(34)......: 
+MPIR_Comm_commit(794).........: 
+MPIR_Comm_commit_internal(579): 
+MPID_Comm_commit_pre_hook(151): 
+MPIDI_world_pre_init(669).....: 
+MPIDI_UCX_init_world(278).....: 
+initial_address_exchange(121).:  ucx function returned with failed status(ucx_init.c 121 initial_address_exchange Input/output error)
+Abort(876734991) on node 155: Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)......: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffca043fcb8) failed
+MPII_Init_thread(282).........: 
+MPIR_init_comm_world(34)......: 
+MPIR_Comm_commit(794).........: 
+MPIR_Comm_commit_internal(579): 
+MPID_Comm_commit_pre_hook(151): 
+MPIDI_world_pre_init(669).....: 
+MPIDI_UCX_init_world(278).....: 
+initial_address_exchange(121).:  ucx function returned with failed status(ucx_init.c 121 initial_address_exchange Input/output error)
+Abort(71428623) on node 180: Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)......: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffec0c99948) failed
+MPII_Init_thread(282).........: 
+MPIR_init_comm_world(34)......: 
+MPIR_Comm_commit(794).........: 
+MPIR_Comm_commit_internal(579): 
+MPID_Comm_commit_pre_hook(151): 
+MPIDI_world_pre_init(669).....: 
+MPIDI_UCX_init_world(278).....: 
+initial_address_exchange(121).:  ucx function returned with failed status(ucx_init.c 121 initial_address_exchange Input/output error)
+[proxy:0@c516-081.stampede3.tacc.utexas.edu] HYD_pmcd_pmip_control_cmd_cb (proxy/pmip_cb.c:487): assert (!closed) failed
+[proxy:0@c516-081.stampede3.tacc.utexas.edu] HYDT_dmxu_poll_wait_for_event (lib/tools/demux/demux_poll.c:76): callback returned error status
+[proxy:0@c516-081.stampede3.tacc.utexas.edu] main (proxy/pmip.c:182): demux engine error waiting for event
+srun: error: c516-081: task 0: Exited with exit code 7
+[mpiexec@c516-081.stampede3.tacc.utexas.edu] HYDT_bscu_wait_for_completion (lib/tools/bootstrap/utils/bscu_wait.c:109): one of the processes terminated badly; aborting
+[mpiexec@c516-081.stampede3.tacc.utexas.edu] HYDT_bsci_wait_for_completion (lib/tools/bootstrap/src/bsci_wait.c:21): launcher returned error waiting for completion
+[mpiexec@c516-081.stampede3.tacc.utexas.edu] HYD_pmci_wait_for_completion (mpiexec/pmiserv_pmci.c:196): launcher returned error waiting for completion
+[mpiexec@c516-081.stampede3.tacc.utexas.edu] main (mpiexec/mpiexec.c:260): process manager error waiting for completion
+Abort(138537487) on node 118: Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)......: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffc46f848d8) failed
+MPII_Init_thread(282).........: 
+MPIR_init_comm_world(34)......: 
+MPIR_Comm_commit(794).........: 
+MPIR_Comm_commit_internal(579): 
+MPID_Comm_commit_pre_hook(151): 
+MPIDI_world_pre_init(669).....: 
+MPIDI_UCX_init_world(278).....: 
+initial_address_exchange(121).:  ucx function returned with failed status(ucx_init.c 121 initial_address_exchange Input/output error)
+Abort(205646351) on node 47: Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)......: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffe0c4236e8) failed
+MPII_Init_thread(282).........: 
+MPIR_init_comm_world(34)......: 
+MPIR_Comm_commit(794).........: 
+MPIR_Comm_commit_internal(579): 
+MPID_Comm_commit_pre_hook(151): 
+MPIDI_world_pre_init(669).....: 
+MPIDI_UCX_init_world(278).....: 
+initial_address_exchange(121).:  ucx function returned with failed status(ucx_init.c 121 initial_address_exchange Input/output error)
+Abort(339864079) on node 210: Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)......: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffc8fdda0d8) failed
+MPII_Init_thread(282).........: 
+MPIR_init_comm_world(34)......: 
+MPIR_Comm_commit(794).........: 
+MPIR_Comm_commit_internal(579): 
+MPID_Comm_commit_pre_hook(151): 
+MPIDI_world_pre_init(669).....: 
+MPIDI_UCX_init_world(278).....: 
+initial_address_exchange(121).:  ucx function returned with failed status(ucx_init.c 121 initial_address_exchange Input/output error)
+Abort(809626127) on node 32: Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)......: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7fffa67074f8) failed
+MPII_Init_thread(282).........: 
+MPIR_init_comm_world(34)......: 
+MPIR_Comm_commit(794).........: 
+MPIR_Comm_commit_internal(579): 
+MPID_Comm_commit_pre_hook(151): 
+MPIDI_world_pre_init(669).....: 
+MPIDI_UCX_init_world(278).....: 
+initial_address_exchange(121).:  ucx function returned with failed status(ucx_init.c 121 initial_address_exchange Input/output error)
+Abort(809626127) on node 16: Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)......: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffff2c9b7b8) failed
+MPII_Init_thread(282).........: 
+MPIR_init_comm_world(34)......: 
+MPIR_Comm_commit(794).........: 
+MPIR_Comm_commit_internal(579): 
+MPID_Comm_commit_pre_hook(151): 
+MPIDI_world_pre_init(669).....: 
+MPIDI_UCX_init_world(278).....: 
+initial_address_exchange(121).:  ucx function returned with failed status(ucx_init.c 121 initial_address_exchange Input/output error)
+Abort(4319759) on node 189: Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)......: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffc41f14c38) failed
+MPII_Init_thread(282).........: 
+MPIR_init_comm_world(34)......: 
+MPIR_Comm_commit(794).........: 
+MPIR_Comm_commit_internal(579): 
+MPID_Comm_commit_pre_hook(151): 
+MPIDI_world_pre_init(669).....: 
+MPIDI_UCX_init_world(278).....: 
+initial_address_exchange(121).:  ucx function returned with failed status(ucx_init.c 121 initial_address_exchange Input/output error)
+[proxy:1@c516-101.stampede3.tacc.utexas.edu] HYD_pmcd_pmip_control_cmd_cb (proxy/pmip_cb.c:487): assert (!closed) failed
+[proxy:1@c516-101.stampede3.tacc.utexas.edu] HYDT_dmxu_poll_wait_for_event (lib/tools/demux/demux_poll.c:76): callback returned error status
+[proxy:1@c516-101.stampede3.tacc.utexas.edu] main (proxy/pmip.c:182): demux engine error waiting for event
+srun: error: c516-101: task 1: Exited with exit code 7
+[mpiexec@c516-081.stampede3.tacc.utexas.edu] HYDT_bscu_wait_for_completion (lib/tools/bootstrap/utils/bscu_wait.c:109): one of the processes terminated badly; aborting
+[mpiexec@c516-081.stampede3.tacc.utexas.edu] HYDT_bsci_wait_for_completion (lib/tools/bootstrap/src/bsci_wait.c:21): launcher returned error waiting for completion
+[mpiexec@c516-081.stampede3.tacc.utexas.edu] HYD_pmci_wait_for_completion (mpiexec/pmiserv_pmci.c:196): launcher returned error waiting for completion
+[mpiexec@c516-081.stampede3.tacc.utexas.edu] main (mpiexec/mpiexec.c:260): process manager error waiting for completion
+Abort(876734991) on node 183: Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)......: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7fffc5887108) failed
+MPII_Init_thread(282).........: 
+MPIR_init_comm_world(34)......: 
+MPIR_Comm_commit(794).........: 
+MPIR_Comm_commit_internal(579): 
+MPID_Comm_commit_pre_hook(151): 
+MPIDI_world_pre_init(669).....: 
+MPIDI_UCX_init_world(278).....: 
+initial_address_exchange(121).:  ucx function returned with failed status(ucx_init.c 121 initial_address_exchange Input/output error)
+Abort(1010952719) on node 51: Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)......: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffcc06de128) failed
+MPII_Init_thread(282).........: 
+MPIR_init_comm_world(34)......: 
+MPIR_Comm_commit(794).........: 
+MPIR_Comm_commit_internal(579): 
+MPID_Comm_commit_pre_hook(151): 
+MPIDI_world_pre_init(669).....: 
+MPIDI_UCX_init_world(278).....: 
+initial_address_exchange(121).:  ucx function returned with failed status(ucx_init.c 121 initial_address_exchange Input/output error)
+Abort(474081807) on node 139: Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)......: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffd5f72bdb8) failed
+MPII_Init_thread(282).........: 
+MPIR_init_comm_world(34)......: 
+MPIR_Comm_commit(794).........: 
+MPIR_Comm_commit_internal(579): 
+MPID_Comm_commit_pre_hook(151): 
+MPIDI_world_pre_init(669).....: 
+MPIDI_UCX_init_world(278).....: 
+initial_address_exchange(121).:  ucx function returned with failed status(ucx_init.c 121 initial_address_exchange Input/output error)
+Abort(742517263) on node 54: Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)......: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffc2d99a538) failed
+MPII_Init_thread(282).........: 
+MPIR_init_comm_world(34)......: 
+MPIR_Comm_commit(794).........: 
+MPIR_Comm_commit_internal(579): 
+MPID_Comm_commit_pre_hook(151): 
+MPIDI_world_pre_init(669).....: 
+MPIDI_UCX_init_world(278).....: 
+initial_address_exchange(121).:  ucx function returned with failed status(ucx_init.c 121 initial_address_exchange Input/output error)
+Abort(541190671) on node 75: Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)......: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffe247ea4e8) failed
+MPII_Init_thread(282).........: 
+MPIR_init_comm_world(34)......: 
+MPIR_Comm_commit(794).........: 
+MPIR_Comm_commit_internal(579): 
+MPID_Comm_commit_pre_hook(151): 
+MPIDI_world_pre_init(669).....: 
+MPIDI_UCX_init_world(278).....: 
+initial_address_exchange(121).:  ucx function returned with failed status(ucx_init.c 121 initial_address_exchange Input/output error)
+Abort(474081807) on node 147: Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)......: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffc21c6c868) failed
+MPII_Init_thread(282).........: 
+MPIR_init_comm_world(34)......: 
+MPIR_Comm_commit(794).........: 
+MPIR_Comm_commit_internal(579): 
+MPID_Comm_commit_pre_hook(151): 
+MPIDI_world_pre_init(669).....: 
+MPIDI_UCX_init_world(278).....: 
+initial_address_exchange(121).:  ucx function returned with failed status(ucx_init.c 121 initial_address_exchange Input/output error)
+Abort(809626127) on node 150: Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)......: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffedc255f78) failed
+MPII_Init_thread(282).........: 
+MPIR_init_comm_world(34)......: 
+MPIR_Comm_commit(794).........: 
+MPIR_Comm_commit_internal(579): 
+MPID_Comm_commit_pre_hook(151): 
+MPIDI_world_pre_init(669).....: 
+MPIDI_UCX_init_world(278).....: 
+initial_address_exchange(121).:  ucx function returned with failed status(ucx_init.c 121 initial_address_exchange Input/output error)
+Abort(138537487) on node 46: Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)......: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffd19c4acb8) failed
+MPII_Init_thread(282).........: 
+MPIR_init_comm_world(34)......: 
+MPIR_Comm_commit(794).........: 
+MPIR_Comm_commit_internal(579): 
+MPID_Comm_commit_pre_hook(151): 
+MPIDI_world_pre_init(669).....: 
+MPIDI_UCX_init_world(278).....: 
+initial_address_exchange(121).:  ucx function returned with failed status(ucx_init.c 121 initial_address_exchange Input/output error)

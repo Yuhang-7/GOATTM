@@ -1,0 +1,10 @@
+L-BFGS evaluation failure #1: ForwardRolloutFailure: Forward rollout failed for sample 'sample-336' (index=336, path='/work2/08667/yuuuhang/stampede3/GOATTM/demo/outputs/slurm_runs/20260429_002609_goattm_demo_ntrain448_ntest112_lbfgs_r8/workflow_dataset/20260429_002623/opinf_init/latent_dataset/train/000336_sample-336.npz') at time 0.7100000000000001.. Returning penalty objective. Saved to /work2/08667/yuuuhang/stampede3/GOATTM/demo/outputs/slurm_runs/20260429_002609_goattm_demo_ntrain448_ntest112_lbfgs_r8/runs/goattm_demo_lbfgs_r8_ntrain448_ntest112_20260429_002633_fe76a7e4/failures/lbfgs_eval_failure_0001_20260429_002634_ea1c3daf.json and /work2/08667/yuuuhang/stampede3/GOATTM/demo/outputs/slurm_runs/20260429_002609_goattm_demo_ntrain448_ntest112_lbfgs_r8/runs/goattm_demo_lbfgs_r8_ntrain448_ntest112_20260429_002633_fe76a7e4/failures/lbfgs_eval_failure_0001_20260429_002634_ea1c3daf.npz.
+[c514-023:165336:a:165396]    ud_verbs.c:451  Fatal: receive completion[0] with error on hfi1_0/0x55ae21a395e0: Work Request Flushed Error, vendor_err 0x0 wr_id 0x149d3bc5b6d4
+[proxy:1@c514-024.stampede3.tacc.utexas.edu] HYD_pmcd_pmip_control_cmd_cb (proxy/pmip_cb.c:487): assert (!closed) failed
+[proxy:1@c514-024.stampede3.tacc.utexas.edu] HYDT_dmxu_poll_wait_for_event (lib/tools/demux/demux_poll.c:76): callback returned error status
+[proxy:1@c514-024.stampede3.tacc.utexas.edu] main (proxy/pmip.c:122): demux engine error waiting for event
+srun: error: c514-024: task 1: Exited with exit code 7
+[mpiexec@c514-023.stampede3.tacc.utexas.edu] HYDT_bscu_wait_for_completion (lib/tools/bootstrap/utils/bscu_wait.c:109): one of the processes terminated badly; aborting
+[mpiexec@c514-023.stampede3.tacc.utexas.edu] HYDT_bsci_wait_for_completion (lib/tools/bootstrap/src/bsci_wait.c:21): launcher returned error waiting for completion
+[mpiexec@c514-023.stampede3.tacc.utexas.edu] HYD_pmci_wait_for_completion (mpiexec/pmiserv_pmci.c:196): launcher returned error waiting for completion
+[mpiexec@c514-023.stampede3.tacc.utexas.edu] main (mpiexec/mpiexec.c:260): process manager error waiting for completion

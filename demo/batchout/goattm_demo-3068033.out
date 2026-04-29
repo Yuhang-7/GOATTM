@@ -1,0 +1,48 @@
+Job start: Wed Apr 29 12:26:11 AM CDT 2026
+Repository root: /work2/08667/yuuuhang/stampede3/GOATTM
+Python: /work2/08667/yuuuhang/anaconda3/envs/fenicsx-clean/bin/python3
+Launcher: ibrun
+SLURM_NTASKS: 112
+MPI_RANKS: 112
+NTRAIN: 448
+NTEST: 112
+LATENT_RANK range: 8..10
+OPTIMIZER: lbfgs
+OUTPUT_ROOT: /work2/08667/yuuuhang/stampede3/GOATTM/demo/outputs/slurm_runs
+----------------------------------------
+Starting LATENT_RANK=8 at Wed Apr 29 12:26:11 AM CDT 2026
+RUN_TAG: 20260429_002609_goattm_demo_ntrain448_ntest112_lbfgs_r8
+OUTPUT_DIR: /work2/08667/yuuuhang/stampede3/GOATTM/demo/outputs/slurm_runs/20260429_002609_goattm_demo_ntrain448_ntest112_lbfgs_r8
+Running GOATTM demo from /work2/08667/yuuuhang/stampede3/GOATTM
+Conda env: fenicsx-clean
+MPI ranks: 112
+Output dir: /work2/08667/yuuuhang/stampede3/GOATTM/demo/outputs/slurm_runs/20260429_002609_goattm_demo_ntrain448_ntest112_lbfgs_r8
+TACC:  Starting up job 3068033 
+TACC:  Starting parallel tasks... 
+[1777440383.658109] [c514-024:142787:0]         address.c:985  UCX  ERROR failed to unpack address, invalid bandwidth 0.00
+[1777440383.658127] [c514-024:142787:0]          wireup.c:982  UCX  ERROR failed to unpack address: Invalid parameter
+[1777440383.658803] [c514-024:142788:0]         address.c:985  UCX  ERROR failed to unpack address, invalid bandwidth 0.00
+[1777440383.658814] [c514-024:142788:0]          wireup.c:982  UCX  ERROR failed to unpack address: Invalid parameter
+[1777440383.660379] [c514-024:142821:0]         address.c:985  UCX  ERROR failed to unpack address, invalid bandwidth 0.00
+[1777440383.660397] [c514-024:142821:0]          wireup.c:982  UCX  ERROR failed to unpack address: Invalid parameter
+[opinf] initialization_start rank=8 train_sample_count=448 test_sample_count=112
+[opinf] fit_start attempt=0 rank=8
+[opinf] basis_done attempt=0 elapsed_seconds=0.03194691694807261 skew_dimension=28 mu_h_dimension=168
+[opinf] local_normal_assembly_done attempt=0 elapsed_seconds=0.07446348294615746 regression_step_count=4480 feature_dimension=212
+[opinf] normal_allreduce_done attempt=0 elapsed_seconds=0.054758814978413284 target_sumsq=18100343.008546315
+[opinf] linear_solve_done attempt=0 elapsed_seconds=0.010287748067639768 feature_dimension=212
+[opinf] fit_done attempt=0 elapsed_seconds=0.2770609729923308 residual_elapsed_seconds=0.04210503899957985 relative_residual=0.9996299712364373
+[opinf] validation_start attempt=0
+[opinf] validation_done attempt=0 elapsed_seconds=0.0701198399765417 success=True checked_sample_count=448 failure_count=0
+Starting GOATTM training run at 2026-04-29T00:26:33 optimizer=lbfgs max_iterations=4000
+[iter 0000] train_obj=4.388647e+03 train_data=4.148141e+03 train_rel=9.626079e-01 decoder_reg=1.097797e+01 dynamics_reg=2.295276e+02 grad=3.854155e+06 step=0.000000e+00 |A|=3.008e+00 |H|=1.515e+03 |B|=3.954e+00 |c|=3.790e-01 test_data=1.079317e+03 test_rel=9.724918e-01 best_iter=0000 best_obj=4.388647e+03 best_test=1.079317e+03
+
+===================================================================================
+=   BAD TERMINATION OF ONE OF YOUR APPLICATION PROCESSES
+=   PID 165336 RUNNING AT c514-023
+=   EXIT CODE: 134
+=   CLEANING UP REMAINING PROCESSES
+=   YOU CAN IGNORE THE BELOW CLEANUP MESSAGES
+===================================================================================
+TACC:  MPI job exited with code: 255 
+TACC:  Shutdown complete. Exiting. 

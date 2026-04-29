@@ -9,7 +9,7 @@ The demo reproduces the small maintained problem setting at larger scale:
   q_j(t) = exp(a_j p(t)) + b_j (p(t)-a_j)^2;
 * OpInf initialization on normalized data;
 * stabilized quadratic reduced dynamics with S initialized as identity;
-* RK4 rollouts for OpInf validation and training;
+* implicit-midpoint rollouts for OpInf validation and training by default;
 * L-BFGS optimization with global MPI reductions.
 
 When launched with ``mpirun -n NTRAIN``, the train manifest is distributed so
@@ -61,6 +61,7 @@ class DemoConfig:
     # Model and solver setting.
     latent_rank: int
     max_dt: float
+    time_integrator: str
 
     # Optimization setting.
     optimizer: str
@@ -108,6 +109,12 @@ def parse_args() -> DemoConfig:
     parser.add_argument("--seed", type=int, default=20260428, help="Synthetic dataset RNG seed.")
     parser.add_argument("--latent-rank", type=int, default=4, help="Reduced latent dimension.")
     parser.add_argument("--max-dt", type=float, default=0.01, help="Maximum rollout time step.")
+    parser.add_argument(
+        "--time-integrator",
+        default="implicit_midpoint",
+        choices=("implicit_midpoint", "explicit_euler", "rk4"),
+        help="Time integrator for OpInf validation and GOATTM training rollouts.",
+    )
     parser.add_argument("--optimizer", default="lbfgs", choices=("lbfgs", "adam", "gradient_descent", "newton_action"))
     parser.add_argument("--max-iterations", type=int, default=50, help="Optimizer max iterations.")
     parser.add_argument("--lbfgs-maxcor", type=int, default=20, help="L-BFGS memory size.")
@@ -136,6 +143,7 @@ def parse_args() -> DemoConfig:
         seed=args.seed,
         latent_rank=args.latent_rank,
         max_dt=args.max_dt,
+        time_integrator=args.time_integrator,
         optimizer=args.optimizer,
         max_iterations=args.max_iterations,
         lbfgs_maxcor=args.lbfgs_maxcor,
@@ -313,7 +321,7 @@ def run_demo(config: DemoConfig) -> dict[str, object] | None:
             coeff_b=config.opinf_reg_b,
             coeff_c=config.opinf_reg_c,
         ),
-        validation_time_integrator="rk4",
+        validation_time_integrator=config.time_integrator,
         max_regularization_retries=8,
         decoder_regularization=DecoderTikhonovRegularization(
             coeff_v1=config.decoder_reg_v1,
@@ -324,7 +332,7 @@ def run_demo(config: DemoConfig) -> dict[str, object] | None:
 
     trainer_config = ReducedQoiTrainerConfig(
         output_dir=config.output_dir / "runs",
-        time_integrator="rk4",
+        time_integrator=config.time_integrator,
         run_name_prefix=f"goattm_demo_{config.optimizer}_r{config.latent_rank}_ntrain{config.ntrain}_ntest{config.ntest}",
         optimizer=config.optimizer,
         max_iterations=config.max_iterations,

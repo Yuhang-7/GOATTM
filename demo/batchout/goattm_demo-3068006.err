@@ -1,0 +1,5 @@
+[c515-004:209317:a:209411]    ud_verbs.c:451  Fatal: receive completion[1] with error on hfi1_0/0x55574aa635f0: Work Request Flushed Error, vendor_err 0x0 wr_id 0x148cb9b30e54
+[proxy:1@c515-011.stampede3.tacc.utexas.edu] HYD_pmcd_pmip_control_cmd_cb (proxy/pmip_cb.c:487): assert (!closed) failed
+[proxy:1@c515-011.stampede3.tacc.utexas.edu] HYDT_dmxu_poll_wait_for_event (lib/tools/demux/demux_poll.c:76): callback returned error status
+[proxy:1@c515-011.stampede3.tacc.utexas.edu] main (proxy/pmip.c:122): demux engine error waiting for event
+srun: error: c515-011: task 1: Exited with exit code 7

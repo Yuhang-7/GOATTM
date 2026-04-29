@@ -1,0 +1,211 @@
+Job start: Tue Apr 28 06:03:46 PM CDT 2026
+Repository root: /work2/08667/yuuuhang/stampede3/GOATTM
+Python: /work2/08667/yuuuhang/anaconda3/envs/fenicsx-clean/bin/python3
+Launcher: ibrun
+SLURM_NTASKS: 1
+MPI_RANKS: 1
+NTRAIN: 2
+NTEST: 2
+LATENT_RANK range: 8..8
+OPTIMIZER: lbfgs
+MAX_ITERATIONS: 2
+OUTPUT_ROOT: /work2/08667/yuuuhang/stampede3/GOATTM/demo/outputs/slurm_test_runs
+----------------------------------------
+Starting LATENT_RANK=8 at Tue Apr 28 06:03:46 PM CDT 2026
+RUN_TAG: 20260428_180346_goattm_demo_test_ntrain2_ntest2_lbfgs_r8
+OUTPUT_DIR: /work2/08667/yuuuhang/stampede3/GOATTM/demo/outputs/slurm_test_runs/20260428_180346_goattm_demo_test_ntrain2_ntest2_lbfgs_r8
+Running GOATTM demo from /work2/08667/yuuuhang/stampede3/GOATTM
+Conda env: fenicsx-clean
+MPI ranks: 1
+Output dir: /work2/08667/yuuuhang/stampede3/GOATTM/demo/outputs/slurm_test_runs/20260428_180346_goattm_demo_test_ntrain2_ntest2_lbfgs_r8
+TACC:  Starting up job 3066943 
+TACC:  Starting parallel tasks... 
+[opinf] initialization_start rank=8 train_sample_count=2 test_sample_count=2
+[opinf] fit_start attempt=0 rank=8
+[opinf] basis_done attempt=0 elapsed_seconds=0.03971749998163432 skew_dimension=28 mu_h_dimension=168
+[opinf] local_normal_assembly_done attempt=0 elapsed_seconds=0.023488607024773955 regression_step_count=20 feature_dimension=212
+[opinf] normal_allreduce_done attempt=0 elapsed_seconds=8.923601126298308e-05 target_sumsq=75597.822176318
+[opinf] linear_solve_done attempt=0 elapsed_seconds=0.05989668401889503 feature_dimension=212
+[opinf] fit_done attempt=0 elapsed_seconds=0.18442123796558008 residual_elapsed_seconds=0.0031151489820331335 relative_residual=0.9278384913519994
+[opinf] validation_start attempt=0
+[opinf] validation_done attempt=0 elapsed_seconds=0.0076468579936772585 success=False checked_sample_count=1 failure_count=1
+[opinf] fit_start attempt=1 rank=8
+[opinf] basis_done attempt=1 elapsed_seconds=0.0005372699815779924 skew_dimension=28 mu_h_dimension=168
+[opinf] local_normal_assembly_done attempt=1 elapsed_seconds=0.0051134449895471334 regression_step_count=20 feature_dimension=212
+[opinf] normal_allreduce_done attempt=1 elapsed_seconds=9.033596143126488e-05 target_sumsq=75597.822176318
+[opinf] linear_solve_done attempt=1 elapsed_seconds=0.0013576539931818843 feature_dimension=212
+[opinf] fit_done attempt=1 elapsed_seconds=0.016487950982991606 residual_elapsed_seconds=0.0033427649759687483 relative_residual=0.9363695113222696
+[opinf] validation_start attempt=1
+[opinf] validation_done attempt=1 elapsed_seconds=0.004923548956867307 success=False checked_sample_count=1 failure_count=1
+[opinf] fit_start attempt=2 rank=8
+[opinf] basis_done attempt=2 elapsed_seconds=0.0004550929879769683 skew_dimension=28 mu_h_dimension=168
+[opinf] local_normal_assembly_done attempt=2 elapsed_seconds=0.004780613002367318 regression_step_count=20 feature_dimension=212
+[opinf] normal_allreduce_done attempt=2 elapsed_seconds=8.19390406832099e-05 target_sumsq=75597.822176318
+[opinf] linear_solve_done attempt=2 elapsed_seconds=0.0012507039937190711 feature_dimension=212
+[opinf] fit_done attempt=2 elapsed_seconds=0.015272188989911228 residual_elapsed_seconds=0.0026474189944565296 relative_residual=0.942866537262664
+[opinf] validation_start attempt=2
+[opinf] validation_done attempt=2 elapsed_seconds=0.017449974024202675 success=True checked_sample_count=2 failure_count=0
+Starting GOATTM training run at 2026-04-28T18:04:16 optimizer=lbfgs max_iterations=2
+[iter 0000] train_obj=8.256290e+00 train_data=1.638229e-07 train_rel=9.005126e-05 decoder_reg=7.939164e-04 dynamics_reg=8.255496e+00 grad=1.033508e+00 step=0.000000e+00 |A|=1.741e+01 |H|=2.924e+02 |B|=3.480e+01 |c|=1.215e+01 test_data=4.657235e+02 test_rel=5.041799e+00 best_iter=0000 best_obj=8.256290e+00 best_test=4.657235e+02
+[iter 0001] train_obj=8.253010e+00 train_data=4.968835e-07 train_rel=1.568302e-04 decoder_reg=6.502715e-04 dynamics_reg=8.252359e+00 grad=9.766765e-02 step=1.000000e+00 |A|=1.753e+01 |H|=2.923e+02 |B|=3.475e+01 |c|=1.217e+01 test_data=5.368159e+02 test_rel=5.412952e+00 best_iter=0000 best_obj=8.256290e+00 best_test=4.657235e+02
+[iter 0002] train_obj=8.251481e+00 train_data=7.442202e-07 train_rel=1.919346e-04 decoder_reg=9.980527e-04 dynamics_reg=8.250482e+00 grad=4.505665e-01 step=5.579161e-02 |A|=1.752e+01 |H|=2.923e+02 |B|=3.475e+01 |c|=1.217e+01 test_data=2.518983e+03 test_rel=1.172557e+01 best_iter=0000 best_obj=8.256290e+00 best_test=4.657235e+02
+Completed GOATTM training run final_iter=2 final_obj=8.251481e+00 best_iter=0 best_obj=8.256290e+00
+{
+  "mpi_world_size": 1,
+  "requested_ntrain": 2,
+  "requested_ntest": 2,
+  "seed": 20260428,
+  "time_horizon": [
+    0.0,
+    1.0
+  ],
+  "observation_dt": 0.1,
+  "max_dt": 0.01,
+  "time_integrator": "rk4",
+  "input_sampling": "uniform[-2,2] at t=0:0.1:1, cubic-spline interpolation",
+  "output_definition": "q_j(t)=exp(a_j p(t)) + b_j (p(t)-a_j)^2",
+  "latent_rank": 8,
+  "optimizer": "lbfgs",
+  "max_iterations": 2,
+  "lbfgs": {
+    "maxcor": 20,
+    "ftol": 1e-12,
+    "gtol": 1e-08,
+    "maxls": 30
+  },
+  "opinf_regularization": {
+    "coeff_w": 0.0001,
+    "coeff_h": 0.0001,
+    "coeff_b": 0.0001,
+    "coeff_c": 1e-06
+  },
+  "decoder_regularization": {
+    "coeff_v1": 1e-07,
+    "coeff_v2": 1e-07,
+    "coeff_v0": 1e-07
+  },
+  "dynamics_regularization": {
+    "coeff_s": 0.0001,
+    "coeff_w": 0.0001,
+    "coeff_mu_h": 0.0001,
+    "coeff_b": 0.0001,
+    "coeff_c": 0.0001
+  },
+  "train_sample_count": 2,
+  "test_sample_count": 2,
+  "initialization": "OpInf initialization from normalized raw data",
+  "qoi_stats": {
+    "output_dimension": 20,
+    "ab_pairs": [
+      [
+        0.9848321055025098,
+        -1.9320175030371138
+      ],
+      [
+        0.6894568476806975,
+        -1.8481955391641511
+      ],
+      [
+        -0.8452821910095394,
+        -0.06613632396743441
+      ],
+      [
+        0.4071412986545364,
+        0.20694468790615872
+      ],
+      [
+        -0.234660087301358,
+        1.6363566752001901
+      ],
+      [
+        -1.915787467639579,
+        1.9253999619086999
+      ],
+      [
+        0.9507022129704521,
+        1.5288286604842254
+      ],
+      [
+        -1.9539224317874688,
+        -1.3593680854662806
+      ],
+      [
+        -0.9483067253115678,
+        -0.5063034899612417
+      ],
+      [
+        1.4275461749628664,
+        -1.5541135495188168
+      ],
+      [
+        0.9692681793033424,
+        -1.4546360208293554
+      ],
+      [
+        1.0224260048394282,
+        0.08652927381815356
+      ],
+      [
+        -0.03896534937160201,
+        1.3879675676546195
+      ],
+      [
+        0.21998730509982867,
+        0.07459530474015752
+      ],
+      [
+        -1.0207978170096705,
+        1.8054863620038115
+      ],
+      [
+        1.2615886831186787,
+        -1.5374437922200883
+      ],
+      [
+        -1.9435796527394804,
+        -1.3502668831178761
+      ],
+      [
+        -1.4923249706317128,
+        1.3117499794564473
+      ],
+      [
+        -1.1934806698493188,
+        -0.9472327018854827
+      ],
+      [
+        -1.595335396200185,
+        -0.9251571535028917
+      ]
+    ],
+    "qoi_abs_mean": 5.948225981471025,
+    "qoi_abs_max": 48.028188954898475,
+    "qoi_l2_mean_per_observation": 33.74318046601141,
+    "qoi_l2_global": 263.59899288800705
+  },
+  "opinf_regression_relative_residual": 0.942866537262664,
+  "opinf_summary_path": "/work2/08667/yuuuhang/stampede3/GOATTM/demo/outputs/slurm_test_runs/20260428_180346_goattm_demo_test_ntrain2_ntest2_lbfgs_r8/workflow_dataset/20260428_180406/opinf_init/opinf_initialization_summary.json",
+  "initial_train_objective": 8.256289809089834,
+  "initial_train_data_loss": 1.6382292009913226e-07,
+  "initial_train_relative_error": 9.005126014080375e-05,
+  "initial_test_data_loss": 465.72349607622016,
+  "initial_test_relative_error": 5.041799268725181,
+  "final_train_objective": 8.251480830813511,
+  "final_train_data_loss": 7.442201577148045e-07,
+  "final_train_relative_error": 0.0001919345583133941,
+  "final_test_data_loss": 2518.982902153187,
+  "final_test_relative_error": 11.725573310389843,
+  "best_train_objective": 8.256289809089834,
+  "best_train_relative_error": 9.005126014080375e-05,
+  "best_test_data_loss": 465.72349607622016,
+  "best_test_relative_error": 5.041799268725181,
+  "run_output_dir": "/work2/08667/yuuuhang/stampede3/GOATTM/demo/outputs/slurm_test_runs/20260428_180346_goattm_demo_test_ntrain2_ntest2_lbfgs_r8/runs/goattm_demo_lbfgs_r8_ntrain2_ntest2_20260428_180416_1c08e56d",
+  "best_checkpoint_path": "/work2/08667/yuuuhang/stampede3/GOATTM/demo/outputs/slurm_test_runs/20260428_180346_goattm_demo_test_ntrain2_ntest2_lbfgs_r8/runs/goattm_demo_lbfgs_r8_ntrain2_ntest2_20260428_180416_1c08e56d/checkpoints/best.npz",
+  "metrics_path": "/work2/08667/yuuuhang/stampede3/GOATTM/demo/outputs/slurm_test_runs/20260428_180346_goattm_demo_test_ntrain2_ntest2_lbfgs_r8/runs/goattm_demo_lbfgs_r8_ntrain2_ntest2_20260428_180416_1c08e56d/metrics.jsonl",
+  "stdout_log_path": "/work2/08667/yuuuhang/stampede3/GOATTM/demo/outputs/slurm_test_runs/20260428_180346_goattm_demo_test_ntrain2_ntest2_lbfgs_r8/runs/goattm_demo_lbfgs_r8_ntrain2_ntest2_20260428_180416_1c08e56d/stdout.log",
+  "stderr_log_path": "/work2/08667/yuuuhang/stampede3/GOATTM/demo/outputs/slurm_test_runs/20260428_180346_goattm_demo_test_ntrain2_ntest2_lbfgs_r8/runs/goattm_demo_lbfgs_r8_ntrain2_ntest2_20260428_180416_1c08e56d/stderr.log"
+}
+TACC:  Shutdown complete. Exiting. 
+Finished LATENT_RANK=8 at Tue Apr 28 06:04:17 PM CDT 2026
+Job end: Tue Apr 28 06:04:17 PM CDT 2026
+Output root: /work2/08667/yuuuhang/stampede3/GOATTM/demo/outputs/slurm_test_runs

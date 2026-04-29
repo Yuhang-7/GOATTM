@@ -1,0 +1,30 @@
+Job start: Wed Apr 29 12:09:18 AM CDT 2026
+Repository root: /work2/08667/yuuuhang/stampede3/GOATTM
+Python: /work2/08667/yuuuhang/anaconda3/envs/fenicsx-clean/bin/python3
+Launcher: /work2/08667/yuuuhang/anaconda3/envs/fenicsx-clean/bin/mpirun
+SLURM_NTASKS: 112
+MPI_RANKS: 112
+NTRAIN: 448
+NTEST: 112
+LATENT_RANK range: 8..10
+OPTIMIZER: lbfgs
+OUTPUT_ROOT: /work2/08667/yuuuhang/stampede3/GOATTM/demo/outputs/slurm_runs
+----------------------------------------
+Starting LATENT_RANK=8 at Wed Apr 29 12:09:18 AM CDT 2026
+RUN_TAG: 20260429_000915_goattm_demo_ntrain448_ntest112_lbfgs_r8
+OUTPUT_DIR: /work2/08667/yuuuhang/stampede3/GOATTM/demo/outputs/slurm_runs/20260429_000915_goattm_demo_ntrain448_ntest112_lbfgs_r8
+Running GOATTM demo from /work2/08667/yuuuhang/stampede3/GOATTM
+Conda env: fenicsx-clean
+MPI ranks: 112
+Output dir: /work2/08667/yuuuhang/stampede3/GOATTM/demo/outputs/slurm_runs/20260429_000915_goattm_demo_ntrain448_ntest112_lbfgs_r8
+
+===================================================================================
+=   BAD TERMINATION OF ONE OF YOUR APPLICATION PROCESSES
+=   PID 209317 RUNNING AT c515-004
+=   EXIT CODE: 134
+=   CLEANING UP REMAINING PROCESSES
+=   YOU CAN IGNORE THE BELOW CLEANUP MESSAGES
+===================================================================================
+YOUR APPLICATION TERMINATED WITH THE EXIT STRING: Aborted (signal 6)
+This typically refers to a problem with your application.
+Please see the FAQ page for debugging suggestions

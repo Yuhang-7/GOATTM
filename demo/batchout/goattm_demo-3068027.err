@@ -1,0 +1,441 @@
+Abort(673835663): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffe00d69ef8) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(808053391): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffceb9491d8) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(1009379983): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffd09691658) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(271182479): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffdf7344a08) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(740944527): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffffd7e3cb8) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(405400207): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffdbbffb278) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(673835663): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffdcc118788) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(808053391): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7fff50738ec8) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(472509071): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffd673343b8) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(69855887): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffee20730d8) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(204073615): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffdad253638) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(136964751): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffcb4af0928) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(606726799): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffddbec4ff8) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(875162255): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffe220b3ec8) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(271182479): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffd32c6c358) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(1009379983): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffccee0ba58) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(472509071): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffdfb9b6b18) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(740944527): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7fff14f00ab8) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(2747023): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffc964e5cf8) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(204073615): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffed27f1308) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(808053391): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffeda569eb8) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(1009379983): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffdf2602c18) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(942271119): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffca15c4518) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(606726799): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffdb8554f08) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(942271119): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffdf7d0f8d8) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(69855887): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7fffd40a27b8) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(2747023): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffc15005f58) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(740944527): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffe28870518) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(271182479): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffe533c4608) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(136964751): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffd58ac8958) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(338291343): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffc5e20ff38) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(808053391): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffc64eebe78) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(606726799): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7fff4f90c068) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(405400207): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffeb4cafa98) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(875162255): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7fffd7730c88) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(405400207): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffe961f0048) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(271182479): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7fff5fca4b28) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(2747023): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffd2a9d31a8) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(405400207): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffe2a49cbe8) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(606726799): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffd72e37158) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(1009379983): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffd15539f78) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(673835663): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffe6b3e3fe8) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(271182479): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffe4d412818) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(204073615): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffc85ead998) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(942271119): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffc7b620a28) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(2747023): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffd7a06cac8) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(875162255): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffffde6fb38) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(673835663): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffd580d56c8) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(740944527): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffd694137b8) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(875162255): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffed39bff38) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(875162255): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffd576bd378) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(2747023): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffcfeca7888) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(338291343): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffd33e6a808) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(271182479): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffc0924cce8) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(740944527): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7fffaa03f2a8) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(136964751): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffe14ed5ab8) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(875162255): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffc292cfd98) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(539617935): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffc96a1fb58) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(136964751): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7fffac91c408) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(606726799): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffe31004238) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(942271119): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffd63b2ca28) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(136964751): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7fff478818a8) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)
+Abort(539617935): Fatal error in internal_Init_thread: Other MPI error, error stack:
+internal_Init_thread(71)...: MPI_Init_thread(argc=(nil), argv=(nil), required=3, provided=0x7ffe2e71d638) failed
+MPII_Init_thread(257)......: 
+MPID_Init(567).............: 
+MPIDI_OFI_init_local(743)..: 
+MPIDI_OFI_find_provider(84): 
+find_provider(126).........: OFI call getinfo failed (default nic=(n/a): No data available)

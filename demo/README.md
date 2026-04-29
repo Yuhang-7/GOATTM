@@ -19,6 +19,11 @@ Run the default 10 train / 10 test case:
 bash demo/run_reduced_qoi_demo.sh
 ```
 
+This wrapper is now geared toward compute-node execution:
+
+- it activates conda env `fenicsx-clean` by default;
+- it writes outputs under `demo/outputs/reduced_qoi_optimization_demo` by default.
+
 Run a larger case:
 
 ```bash
@@ -80,6 +85,8 @@ Useful Python options:
 Useful shell variables:
 
 - `MPI_RANKS`, default `NTRAIN`
+- `CONDA_ENV_NAME`, default `fenicsx-clean`
+- `GOATTM_SKIP_CONDA_ACTIVATE=1` to skip activation when the env is already active
 - `LATENT_RANK`, default `4`
 - `OPTIMIZER`, default `lbfgs`
 - `MAX_ITERATIONS`, default `50`
@@ -91,6 +98,6 @@ Useful shell variables:
 - `DYNAMICS_REG_S`, `DYNAMICS_REG_W`, `DYNAMICS_REG_MU_H`, `DYNAMICS_REG_B`, `DYNAMICS_REG_C`
 - `OUTPUT_DIR`, default `demo/outputs/reduced_qoi_optimization_demo`
 
-Outputs are written under `demo/outputs/reduced_qoi_optimization_demo` by
-default. The latest top-level summary is `latest_summary.json`; per-run logs,
-metrics, checkpoints, and OpInf logs are linked from that summary.
+Outputs are written under the selected `OUTPUT_DIR`. The latest top-level
+summary is `latest_summary.json`; per-run logs, metrics, checkpoints, and
+OpInf logs are linked from that summary.
