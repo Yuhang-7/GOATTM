@@ -37,6 +37,10 @@ workflow_dataset/
 mpi_dataset/
 application/swe_problem/data/processed_data/
 application/swe_problem/data/processed_data_smoke/
+application/swe_problem/outputs/
+demo/batchout/
+module_test/implicit_explicit_solver/*.csv
+module_test/implicit_explicit_solver/*.png
 
 # Chinese prompt/report drafts; keep the English/body files tracked.
 *_zhcn*

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,8 +19,17 @@ if str(SRC_ROOT) not in sys.path:
 from goattm.data import NpzQoiSample, NpzSampleManifest, save_npz_qoi_sample, save_npz_sample_manifest  # noqa: E402
 
 
-DEFAULT_INPUT_ROOT = THIS_FILE.parents[1] / "data" / "original_data"
+INPUT_ROOT_ENV_VAR = "SWE_ORIGINAL_DATA_ROOT"
+CURRENT_ORIGINAL_DATA_ROOT = Path("/storage/yuhang/swedata/originaldata/swe_data_2026_510510")
 DEFAULT_OUTPUT_ROOT = THIS_FILE.parents[1] / "data" / "processed_data"
+DEFAULT_QOI_STRIDE = 5
+
+
+def default_input_root() -> Path:
+    env_value = os.environ.get(INPUT_ROOT_ENV_VAR)
+    if env_value:
+        return Path(env_value).expanduser()
+    return CURRENT_ORIGINAL_DATA_ROOT
 
 
 @dataclass(frozen=True)
@@ -38,8 +48,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--input-root",
         type=Path,
-        default=DEFAULT_INPUT_ROOT,
-        help="Directory containing original per-sample subdirectories.",
+        default=None,
+        help=(
+            "Directory containing original per-sample subdirectories. "
+            f"Defaults to ${INPUT_ROOT_ENV_VAR}, or {CURRENT_ORIGINAL_DATA_ROOT} if the environment variable is unset."
+        ),
     )
     parser.add_argument(
         "--output-root",
@@ -52,6 +65,15 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Optional cap on the number of samples to process, for smoke testing.",
+    )
+    parser.add_argument(
+        "--qoi-stride",
+        type=int,
+        default=DEFAULT_QOI_STRIDE,
+        help=(
+            "Keep every qoi_stride-th physical QoI time. The default keeps "
+            "5, 10, ..., 1500 and prepends a zero QoI at t=0."
+        ),
     )
     return parser.parse_args()
 
@@ -83,7 +105,9 @@ def _load_required_matrix(npz_data: np.lib.npyio.NpzFile, key: str) -> np.ndarra
     return value
 
 
-def convert_original_sample(original_path: Path, output_samples_root: Path) -> ConvertedSample:
+def convert_original_sample(original_path: Path, output_samples_root: Path, qoi_stride: int) -> ConvertedSample:
+    if qoi_stride <= 0:
+        raise ValueError(f"qoi_stride must be positive, got {qoi_stride}")
     sample_id = original_path.stem
     with np.load(original_path, allow_pickle=True) as data:
         sensor_locations = _load_required_matrix(data, "sensor_locations")
@@ -104,13 +128,23 @@ def convert_original_sample(original_path: Path, output_samples_root: Path) -> C
             f"{original_path} has qoi_values shape {qoi_values.shape}, "
             f"expected second axis to match qoi_times length {qoi_times.shape[0]}."
         )
+    qoi_time_indices = np.flatnonzero(np.isclose(np.remainder(qoi_times, float(qoi_stride)), 0.0))
+    if qoi_time_indices.size == 0:
+        raise ValueError(f"{original_path} has no qoi_times divisible by qoi_stride={qoi_stride}.")
 
     source_count = xi.shape[0]
     if not all(vector.shape[0] == source_count for vector in (yi, ti, sigma_i, hi)):
         raise ValueError(f"{original_path} has inconsistent source parameter lengths.")
 
-    observation_times = qoi_times - float(qoi_times[0])
-    qoi_observations = np.asarray(qoi_values.T, dtype=np.float64)
+    selected_qoi_times = qoi_times[qoi_time_indices]
+    selected_qoi_values = qoi_values[:, qoi_time_indices].T
+    observation_times = np.concatenate([[0.0], selected_qoi_times], axis=0)
+    qoi_observations = np.vstack(
+        [
+            np.zeros((1, qoi_values.shape[0]), dtype=np.float64),
+            np.asarray(selected_qoi_values, dtype=np.float64),
+        ]
+    )
     constant_input = np.concatenate([xi, yi, ti, sigma_i, hi], axis=0)
     input_values = np.repeat(constant_input[None, :], observation_times.shape[0], axis=0)
     sample = NpzQoiSample(
@@ -123,7 +157,11 @@ def convert_original_sample(original_path: Path, output_samples_root: Path) -> C
         metadata={
             "dataset_kind": "swe_sensor_qoi",
             "original_npz_path": str(original_path),
-            "original_time_offset": float(qoi_times[0]),
+            "original_time_offset": 0.0,
+            "qoi_stride": int(qoi_stride),
+            "prepended_zero_initial_qoi": 1,
+            "kept_original_qoi_time_first": float(selected_qoi_times[0]),
+            "kept_original_qoi_time_last": float(selected_qoi_times[-1]),
             "sensor_locations": sensor_locations,
             "xi": xi,
             "yi": yi,
@@ -148,6 +186,7 @@ def write_summary(
     input_root: Path,
     manifest: NpzSampleManifest,
     converted_samples: list[ConvertedSample],
+    qoi_stride: int,
 ) -> None:
     first = converted_samples[0]
     summary = {
@@ -159,6 +198,10 @@ def write_summary(
         "observation_count_per_sample": int(first.observation_count),
         "qoi_output_dimension": int(first.output_dimension),
         "input_parameter_dimension": int(first.input_dimension),
+        "qoi_stride": int(qoi_stride),
+        "prepended_zero_initial_qoi": True,
+        "kept_original_qoi_time_first": first.sample.metadata["kept_original_qoi_time_first"],
+        "kept_original_qoi_time_last": first.sample.metadata["kept_original_qoi_time_last"],
         "sample_id_first": manifest.sample_ids[0],
         "sample_id_last": manifest.sample_ids[-1],
     }
@@ -168,7 +211,10 @@ def write_summary(
 
 def main() -> None:
     args = parse_args()
-    sample_paths = discover_original_samples(args.input_root)
+    input_root = default_input_root() if args.input_root is None else args.input_root.expanduser()
+    if args.qoi_stride <= 0:
+        raise ValueError(f"--qoi-stride must be positive, got {args.qoi_stride}")
+    sample_paths = discover_original_samples(input_root)
     if args.limit is not None:
         if args.limit <= 0:
             raise ValueError(f"--limit must be positive, got {args.limit}")
@@ -183,7 +229,7 @@ def main() -> None:
     manifest_sample_paths: list[Path] = []
     manifest_sample_ids: list[str] = []
     for original_path in sample_paths:
-        converted = convert_original_sample(original_path.resolve(), output_samples_root)
+        converted = convert_original_sample(original_path.resolve(), output_samples_root, qoi_stride=args.qoi_stride)
         save_npz_qoi_sample(converted.sample_path, converted.sample)
         converted_samples.append(converted)
         manifest_sample_paths.append(Path("samples") / converted.sample_path.name)
@@ -195,10 +241,10 @@ def main() -> None:
         sample_ids=tuple(manifest_sample_ids),
     )
     save_npz_sample_manifest(output_root / "manifest.npz", manifest)
-    write_summary(output_root, args.input_root.resolve(), manifest, converted_samples)
+    write_summary(output_root, input_root.resolve(), manifest, converted_samples, qoi_stride=args.qoi_stride)
 
     print(
-        f"Converted {len(converted_samples)} samples from {args.input_root} to {output_root}.",
+        f"Converted {len(converted_samples)} samples from {input_root} to {output_root}.",
         flush=True,
     )
 
