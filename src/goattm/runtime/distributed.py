@@ -97,6 +97,20 @@ class DistributedContext:
         self._comm.Allreduce(array, reduced, op=mpi_module.SUM)
         return reduced
 
+    def allreduce_array_max(self, value: np.ndarray) -> np.ndarray:
+        array = np.asarray(value, dtype=np.float64)
+        self.ensure_same_array_shape(array, label="allreduce_array_max")
+        if self._comm is None:
+            return array.copy()
+        if not _comm_uses_mpi4py(self._comm):
+            return np.asarray(self._comm.allreduce(array), dtype=np.float64)
+        mpi_module = _load_mpi_module()
+        if mpi_module is None:
+            raise RuntimeError("mpi4py communicator detected but mpi4py could not be imported.")
+        reduced = np.zeros_like(array)
+        self._comm.Allreduce(array, reduced, op=mpi_module.MAX)
+        return reduced
+
     def ensure_same_array_shape(self, value: np.ndarray, label: str = "array collective") -> None:
         if self._comm is None or self.size <= 1:
             return

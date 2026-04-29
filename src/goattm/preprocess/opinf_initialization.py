@@ -88,6 +88,8 @@ class OpInfInitializationResult:
             "latent_test_manifest_path": None if self.latent_test_manifest_path is None else str(self.latent_test_manifest_path),
             "time_scale": float(self.time_scale),
             "time_rescaled_to_unit_interval": bool(self.time_rescaled_to_unit_interval),
+            "normalization_scale_mode": self.normalized_artifacts.stats.scale_mode,
+            "normalization_target_max_abs": float(self.normalized_artifacts.stats.target_max_abs),
             "regression_relative_residual": float(self.regression_relative_residual),
             "validation_success": bool(self.validation_success),
             "validation_attempt_count": int(self.validation_attempt_count),
@@ -103,6 +105,7 @@ def initialize_reduced_model_via_opinf(
     test_manifest: str | Path | NpzSampleManifest | None = None,
     context: DistributedContext | None = None,
     apply_normalization: bool = True,
+    normalization_target_max_abs: float = 0.9,
     time_rescale_to_unit_interval: bool = True,
     max_dt: float = 0.04,
     regularization: OpInfInitializationRegularization | None = None,
@@ -131,6 +134,7 @@ def initialize_reduced_model_via_opinf(
             test_manifest=test_manifest,
             output_dir=output_root / "normalized",
             context=context,
+            target_max_abs=normalization_target_max_abs,
         )
         normalized_train_manifest = normalized_artifacts.train_manifest
         normalized_test_manifest = normalized_artifacts.test_manifest
@@ -153,6 +157,8 @@ def initialize_reduced_model_via_opinf(
                 qoi_std=np.ones(load_npz_qoi_sample(normalized_train_manifest.absolute_paths()[0]).output_dimension, dtype=np.float64),
                 input_mean=None if _infer_input_dimension(normalized_train_manifest) == 0 else np.zeros(_infer_input_dimension(normalized_train_manifest), dtype=np.float64),
                 input_std=None if _infer_input_dimension(normalized_train_manifest) == 0 else np.ones(_infer_input_dimension(normalized_train_manifest), dtype=np.float64),
+                scale_mode="identity",
+                target_max_abs=1.0,
             ),
         )
 
@@ -210,6 +216,11 @@ def initialize_reduced_model_via_opinf(
     validation_records: list[dict[str, object]] = []
     validation_success = False
     current_regularization = regularization
+    validation_manifests: tuple[tuple[str, NpzSampleManifest], ...]
+    if latent_test_manifest is None:
+        validation_manifests = (("train", latent_train_manifest),)
+    else:
+        validation_manifests = (("train", latent_train_manifest), ("test", latent_test_manifest))
     for attempt in range(max_regularization_retries + 1):
         dynamics, regression_relative_residual = _fit_stabilized_dynamics_from_latent_dataset(
             manifest=latent_train_manifest,
@@ -223,7 +234,7 @@ def initialize_reduced_model_via_opinf(
         validation_start = time.perf_counter()
         _write_opinf_debug(context, debug_log_path, "validation_start", attempt=attempt)
         validation_record = _validate_opinf_forward_rollouts(
-            manifest=latent_train_manifest,
+            manifests=validation_manifests,
             dynamics=dynamics,
             context=context,
             max_dt=max_dt,
@@ -280,6 +291,7 @@ def initialize_reduced_model_via_opinf(
             "time_scale": float(time_scale),
             "time_rescaled_to_unit_interval": bool(time_rescale_to_unit_interval),
             "apply_normalization": bool(apply_normalization),
+            "normalization_target_max_abs": float(normalization_target_max_abs),
             "latent_embedding_mode": latent_embedding.mode,
             "augmentation_seed": int(latent_embedding.augmentation_seed),
             "augmentation_scale": float(latent_embedding.augmentation_scale),
@@ -606,7 +618,7 @@ def _compute_dynamics_fit_residual_sumsq(
 
 
 def _validate_opinf_forward_rollouts(
-    manifest: NpzSampleManifest,
+    manifests: tuple[tuple[str, NpzSampleManifest], ...],
     dynamics: StabilizedQuadraticDynamics,
     context: DistributedContext,
     max_dt: float,
@@ -614,26 +626,32 @@ def _validate_opinf_forward_rollouts(
 ) -> dict[str, object]:
     local_failure: str | None = None
     local_checked_count = 0
-    for sample_id, sample_path in manifest.entries_for_rank(context.rank, context.size):
-        sample = load_npz_qoi_sample(sample_path)
-        local_checked_count += 1
-        try:
-            result, states = rollout_to_observation_times(
-                dynamics=dynamics,
-                u0=np.asarray(sample.u0, dtype=np.float64),
-                observation_times=np.asarray(sample.observation_times, dtype=np.float64),
-                max_dt=max_dt,
-                input_function=sample.build_input_function(),
-                time_integrator=time_integrator,
-            )
-        except Exception as exc:  # pragma: no cover - exercised by retry behavior in integration use.
-            local_failure = f"rank={context.rank} sample_id={sample_id}: {type(exc).__name__}: {exc}"
-            break
-        if not result.success:
-            local_failure = f"rank={context.rank} sample_id={sample_id}: rollout reported failure"
-            break
-        if not np.all(np.isfinite(states)):
-            local_failure = f"rank={context.rank} sample_id={sample_id}: rollout produced nonfinite states"
+    for dataset_name, manifest in manifests:
+        for sample_id, sample_path in manifest.entries_for_rank(context.rank, context.size):
+            sample = load_npz_qoi_sample(sample_path)
+            local_checked_count += 1
+            try:
+                result, states = rollout_to_observation_times(
+                    dynamics=dynamics,
+                    u0=np.asarray(sample.u0, dtype=np.float64),
+                    observation_times=np.asarray(sample.observation_times, dtype=np.float64),
+                    max_dt=max_dt,
+                    input_function=sample.build_input_function(),
+                    time_integrator=time_integrator,
+                )
+            except Exception as exc:  # pragma: no cover - exercised by retry behavior in integration use.
+                local_failure = (
+                    f"rank={context.rank} dataset={dataset_name} sample_id={sample_id}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                break
+            if not result.success:
+                local_failure = f"rank={context.rank} dataset={dataset_name} sample_id={sample_id}: rollout reported failure"
+                break
+            if not np.all(np.isfinite(states)):
+                local_failure = f"rank={context.rank} dataset={dataset_name} sample_id={sample_id}: rollout produced nonfinite states"
+                break
+        if local_failure is not None:
             break
 
     global_failure_count = context.allreduce_int_sum(1 if local_failure is not None else 0)
@@ -645,6 +663,7 @@ def _validate_opinf_forward_rollouts(
         "global_failure_count": int(global_failure_count),
         "global_checked_sample_count": int(global_checked_count),
         "local_checked_sample_count": int(local_checked_count),
+        "datasets": [dataset_name for dataset_name, _ in manifests],
         "time_integrator": time_integrator,
         "max_dt": float(max_dt),
         "first_failure": None if not failures else failures[0],

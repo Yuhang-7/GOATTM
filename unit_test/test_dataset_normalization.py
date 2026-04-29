@@ -77,9 +77,13 @@ class DatasetNormalizationTest(unittest.TestCase):
 
             stats = compute_training_normalization_stats(train_manifest)
             np.testing.assert_allclose(stats.qoi_mean, np.array([4.0, 16.0]))
-            np.testing.assert_allclose(stats.qoi_std, np.sqrt(np.array([5.0, 20.0])))
+            np.testing.assert_allclose(stats.qoi_std, np.array([3.0, 6.0]) / 0.9)
+            np.testing.assert_allclose(stats.qoi_centered_max_abs, np.array([3.0, 6.0]))
             np.testing.assert_allclose(stats.input_mean, np.array([5.0]))
-            np.testing.assert_allclose(stats.input_std, np.sqrt(np.array([5.0])))
+            np.testing.assert_allclose(stats.input_std, np.array([3.0]) / 0.9)
+            np.testing.assert_allclose(stats.input_centered_max_abs, np.array([3.0]))
+            self.assertEqual(stats.scale_mode, "max_abs")
+            self.assertAlmostEqual(stats.target_max_abs, 0.9)
 
             artifacts = materialize_normalized_train_test_split(
                 train_manifest=train_manifest,
@@ -97,9 +101,9 @@ class DatasetNormalizationTest(unittest.TestCase):
             train_qoi = np.concatenate(normalized_train_arrays, axis=0)
             train_inputs = np.concatenate(normalized_train_inputs, axis=0)
             np.testing.assert_allclose(np.mean(train_qoi, axis=0), np.zeros(2), atol=1e-12)
-            np.testing.assert_allclose(np.std(train_qoi, axis=0), np.ones(2), atol=1e-12)
+            np.testing.assert_allclose(np.max(np.abs(train_qoi), axis=0), 0.9 * np.ones(2), atol=1e-12)
             np.testing.assert_allclose(np.mean(train_inputs, axis=0), np.zeros(1), atol=1e-12)
-            np.testing.assert_allclose(np.std(train_inputs, axis=0), np.ones(1), atol=1e-12)
+            np.testing.assert_allclose(np.max(np.abs(train_inputs), axis=0), 0.9 * np.ones(1), atol=1e-12)
 
             normalized_test = load_npz_qoi_sample(artifacts.test_manifest.absolute_paths()[0])
             self.assertEqual(normalized_test.metadata["split"], "test")
@@ -123,9 +127,11 @@ class DatasetNormalizationTest(unittest.TestCase):
             manifest = NpzSampleManifest(root_dir=root, sample_paths=(path,), sample_ids=("constant-dim",))
             stats = compute_training_normalization_stats(manifest)
             np.testing.assert_allclose(stats.qoi_mean, np.array([3.0, 3.0]))
-            np.testing.assert_allclose(stats.qoi_std, np.array([1.0, 2.0]))
+            np.testing.assert_allclose(stats.qoi_std, np.array([1.0, 2.0 / 0.9]))
+            np.testing.assert_allclose(stats.qoi_centered_max_abs, np.array([0.0, 2.0]))
             np.testing.assert_allclose(stats.input_mean, np.array([2.0]))
             np.testing.assert_allclose(stats.input_std, np.array([1.0]))
+            np.testing.assert_allclose(stats.input_centered_max_abs, np.array([0.0]))
 
 
 def _build_sample(sample_id: str, qoi_observations: np.ndarray, input_values: np.ndarray):

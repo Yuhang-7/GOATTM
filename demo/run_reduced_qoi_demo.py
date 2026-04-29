@@ -63,6 +63,7 @@ class DemoConfig:
     latent_rank: int
     max_dt: float
     time_integrator: str
+    normalization_target_max_abs: float
 
     # Optimization setting.
     optimizer: str
@@ -111,6 +112,12 @@ def parse_args() -> DemoConfig:
     parser.add_argument("--latent-rank", type=int, default=4, help="Reduced latent dimension.")
     parser.add_argument("--max-dt", type=float, default=0.01, help="Maximum rollout time step.")
     parser.add_argument(
+        "--normalization-target-max-abs",
+        type=float,
+        default=0.9,
+        help="Per-dimension max absolute value after centered train-set normalization.",
+    )
+    parser.add_argument(
         "--time-integrator",
         default="implicit_midpoint",
         choices=("implicit_midpoint", "explicit_euler", "rk4"),
@@ -144,6 +151,7 @@ def parse_args() -> DemoConfig:
         seed=args.seed,
         latent_rank=args.latent_rank,
         max_dt=args.max_dt,
+        normalization_target_max_abs=args.normalization_target_max_abs,
         time_integrator=args.time_integrator,
         optimizer=args.optimizer,
         max_iterations=args.max_iterations,
@@ -185,6 +193,10 @@ def validate_config(config: DemoConfig) -> None:
         raise ValueError(f"max_iterations must be positive, got {config.max_iterations}")
     if config.max_dt <= 0.0:
         raise ValueError(f"max_dt must be positive, got {config.max_dt}")
+    if config.normalization_target_max_abs <= 0.0:
+        raise ValueError(
+            f"normalization_target_max_abs must be positive, got {config.normalization_target_max_abs}"
+        )
     if config.observation_dt <= 0.0:
         raise ValueError(f"observation_dt must be positive, got {config.observation_dt}")
     if config.output_dimension <= 0:
@@ -515,6 +527,7 @@ def run_demo(config: DemoConfig) -> dict[str, object] | None:
         rank=config.latent_rank,
         context=context,
         apply_normalization=True,
+        normalization_target_max_abs=config.normalization_target_max_abs,
         time_rescale_to_unit_interval=True,
         max_dt=config.max_dt,
         regularization=OpInfInitializationRegularization(
@@ -592,6 +605,7 @@ def run_demo(config: DemoConfig) -> dict[str, object] | None:
         "observation_dt": config.observation_dt,
         "max_dt": config.max_dt,
         "time_integrator": trainer_config.time_integrator,
+        "normalization_target_max_abs": config.normalization_target_max_abs,
         "input_sampling": "uniform[-2,2] at t=0:0.1:1, cubic-spline interpolation",
         "output_definition": "q_j(t)=exp(a_j p(t)) + b_j (p(t)-a_j)^2",
         "latent_rank": config.latent_rank,

@@ -59,12 +59,15 @@ def implicit_midpoint_residual(
     dt: float,
     t_prev: float = 0.0,
     input_function: Callable[[float], np.ndarray] | None = None,
+    residual_scale: float = 1.0,
 ) -> np.ndarray:
     dynamics.validate_state(u_prev, "u_prev")
     dynamics.validate_state(u_next, "u_next")
+    if not (0.0 <= residual_scale <= 1.0):
+        raise ValueError(f"residual_scale must lie in [0, 1], got {residual_scale}")
     midpoint = 0.5 * (u_prev + u_next)
     midpoint_time = t_prev + 0.5 * dt
-    return u_next - u_prev - dt * dynamics.rhs_at_time(midpoint, midpoint_time, input_function=input_function)
+    return u_next - u_prev - residual_scale * dt * dynamics.rhs_at_time(midpoint, midpoint_time, input_function=input_function)
 
 
 def implicit_midpoint_jacobian(
@@ -73,11 +76,14 @@ def implicit_midpoint_jacobian(
     u_next: np.ndarray,
     dt: float,
     t_prev: float = 0.0,
+    residual_scale: float = 1.0,
 ) -> np.ndarray:
     dynamics.validate_state(u_prev, "u_prev")
     dynamics.validate_state(u_next, "u_next")
+    if not (0.0 <= residual_scale <= 1.0):
+        raise ValueError(f"residual_scale must lie in [0, 1], got {residual_scale}")
     midpoint = 0.5 * (u_prev + u_next)
-    return np.eye(dynamics.dimension) - 0.5 * dt * dynamics.rhs_jacobian(midpoint)
+    return np.eye(dynamics.dimension) - 0.5 * residual_scale * dt * dynamics.rhs_jacobian(midpoint)
 
 
 def solve_implicit_midpoint_step(
@@ -91,10 +97,13 @@ def solve_implicit_midpoint_step(
     max_iter: int = 25,
     backtrack_factor: float = 0.5,
     max_backtracks: int = 8,
+    residual_scale: float = 1.0,
 ) -> tuple[np.ndarray, NewtonSolveInfo]:
     dynamics.validate_state(u_prev, "u_prev")
+    if not (0.0 <= residual_scale <= 1.0):
+        raise ValueError(f"residual_scale must lie in [0, 1], got {residual_scale}")
     if guess is None:
-        current = explicit_euler_guess(dynamics, u_prev, dt, t_prev=t_prev, input_function=input_function)
+        current = u_prev + residual_scale * dt * dynamics.rhs_at_time(u_prev, t_prev, input_function=input_function)
     else:
         dynamics.validate_state(guess, "guess")
         current = guess.copy()
@@ -107,6 +116,7 @@ def solve_implicit_midpoint_step(
         dt,
         t_prev=t_prev,
         input_function=input_function,
+        residual_scale=residual_scale,
     )
     residual_norm = float(np.linalg.norm(residual))
 
@@ -116,7 +126,14 @@ def solve_implicit_midpoint_step(
         if residual_norm <= tol:
             return current, NewtonSolveInfo(True, iteration - 1, residual_norm, total_backtracks)
 
-        jacobian = implicit_midpoint_jacobian(dynamics, u_prev, current, dt, t_prev=t_prev)
+        jacobian = implicit_midpoint_jacobian(
+            dynamics,
+            u_prev,
+            current,
+            dt,
+            t_prev=t_prev,
+            residual_scale=residual_scale,
+        )
         try:
             delta = np.linalg.solve(jacobian, -residual)
         except np.linalg.LinAlgError:
@@ -136,6 +153,7 @@ def solve_implicit_midpoint_step(
                 dt,
                 t_prev=t_prev,
                 input_function=input_function,
+                residual_scale=residual_scale,
             )
             trial_norm = float(np.linalg.norm(trial_residual))
             if np.isfinite(trial_norm) and trial_norm < residual_norm:
@@ -154,6 +172,95 @@ def solve_implicit_midpoint_step(
     return current, NewtonSolveInfo(residual_norm <= tol, max_iter, residual_norm, total_backtracks)
 
 
+def solve_implicit_midpoint_step_homotopy(
+    dynamics: QuadraticDynamics,
+    u_prev: np.ndarray,
+    dt: float,
+    t_prev: float = 0.0,
+    input_function: Callable[[float], np.ndarray] | None = None,
+    tol: float = 1e-10,
+    max_iter: int = 25,
+    backtrack_factor: float = 0.5,
+    max_backtracks: int = 8,
+    initial_lambda_step: float = 0.1,
+    min_lambda_step: float = 1.0e-4,
+) -> tuple[np.ndarray, NewtonSolveInfo]:
+    """Track the physical implicit-midpoint root from lambda=0 to lambda=1.
+
+    The homotopy residual is
+        F_lambda(u) = u - u_prev - lambda * dt * f((u_prev + u) / 2).
+    At lambda=0, the root is exactly u_prev.  Stepping lambda upward and
+    warm-starting Newton with the previous root makes it much harder for
+    Newton to jump to a far-field spurious root of the quadratic equation.
+    """
+    dynamics.validate_state(u_prev, "u_prev")
+    if not (0.0 < initial_lambda_step <= 1.0):
+        raise ValueError(f"initial_lambda_step must lie in (0, 1], got {initial_lambda_step}")
+    if not (0.0 < min_lambda_step <= initial_lambda_step):
+        raise ValueError(
+            f"min_lambda_step must lie in (0, initial_lambda_step], got {min_lambda_step}"
+        )
+
+    current = u_prev.copy()
+    current_lambda = 0.0
+    lambda_step = float(initial_lambda_step)
+    total_iterations = 0
+    total_backtracks = 0
+    last_residual_norm = 0.0
+
+    while current_lambda < 1.0 - 1e-14:
+        target_lambda = min(1.0, current_lambda + lambda_step)
+        candidate, info = solve_implicit_midpoint_step(
+            dynamics=dynamics,
+            u_prev=u_prev,
+            dt=dt,
+            t_prev=t_prev,
+            input_function=input_function,
+            guess=current,
+            tol=tol,
+            max_iter=max_iter,
+            backtrack_factor=backtrack_factor,
+            max_backtracks=max_backtracks,
+            residual_scale=target_lambda,
+        )
+        total_iterations += info.iterations
+        total_backtracks += info.backtracks
+        last_residual_norm = info.residual_norm
+        if info.success and np.all(np.isfinite(candidate)):
+            current = candidate
+            current_lambda = target_lambda
+            lambda_step = min(1.0 - current_lambda, initial_lambda_step, 1.25 * lambda_step)
+            if lambda_step <= 0.0:
+                break
+            continue
+
+        lambda_step *= 0.5
+        if lambda_step < min_lambda_step:
+            return current, NewtonSolveInfo(
+                success=False,
+                iterations=total_iterations,
+                residual_norm=last_residual_norm,
+                backtracks=total_backtracks,
+            )
+
+    final_residual = implicit_midpoint_residual(
+        dynamics=dynamics,
+        u_prev=u_prev,
+        u_next=current,
+        dt=dt,
+        t_prev=t_prev,
+        input_function=input_function,
+        residual_scale=1.0,
+    )
+    final_norm = float(np.linalg.norm(final_residual))
+    return current, NewtonSolveInfo(
+        success=np.isfinite(final_norm) and final_norm <= tol,
+        iterations=total_iterations,
+        residual_norm=final_norm,
+        backtracks=total_backtracks,
+    )
+
+
 def solve_implicit_midpoint_step_with_retry(
     dynamics: QuadraticDynamics,
     u_prev: np.ndarray,
@@ -164,6 +271,9 @@ def solve_implicit_midpoint_step_with_retry(
     dt_min: float = 1e-6,
     tol: float = 1e-10,
     max_iter: int = 25,
+    use_homotopy_fallback: bool = True,
+    homotopy_initial_lambda_step: float = 0.1,
+    homotopy_min_lambda_step: float = 1.0e-4,
 ) -> StepResult:
     dynamics.validate_state(u_prev, "u_prev")
     dt_trial = dt_initial
@@ -182,7 +292,7 @@ def solve_implicit_midpoint_step_with_retry(
             tol=tol,
             max_iter=max_iter,
         )
-        if info.success:
+        if info.success and np.all(np.isfinite(u_next)):
             return StepResult(
                 success=True,
                 dt_used=dt_trial,
@@ -192,6 +302,29 @@ def solve_implicit_midpoint_step_with_retry(
                 newton_iterations=info.iterations,
                 u_next=u_next,
             )
+
+        if use_homotopy_fallback:
+            u_next, info = solve_implicit_midpoint_step_homotopy(
+                dynamics=dynamics,
+                u_prev=u_prev,
+                dt=dt_trial,
+                t_prev=t_prev,
+                input_function=input_function,
+                tol=tol,
+                max_iter=max_iter,
+                initial_lambda_step=homotopy_initial_lambda_step,
+                min_lambda_step=homotopy_min_lambda_step,
+            )
+            if info.success:
+                return StepResult(
+                    success=True,
+                    dt_used=dt_trial,
+                    dt_reductions=dt_reductions,
+                    newton_failures=newton_failures + 1,
+                    residual_norm=info.residual_norm,
+                    newton_iterations=info.iterations,
+                    u_next=u_next,
+                )
 
         newton_failures += 1
         dt_trial *= dt_shrink

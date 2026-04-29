@@ -57,6 +57,7 @@ Useful Python options:
 - `--latent-rank 4`
 - `--max-dt 0.01`
 - `--time-integrator implicit_midpoint`
+- `--normalization-target-max-abs 0.9`
 
 - Optimization setting:
 - `--optimizer lbfgs`
@@ -93,6 +94,7 @@ Useful shell variables:
 - `MAX_ITERATIONS`, default `500`
 - `MAX_DT`, default `0.01`
 - `TIME_INTEGRATOR`, default `implicit_midpoint`
+- `NORMALIZATION_TARGET_MAX_ABS`, default `0.9`
 - `SEED`, default `20260428`
 - `LBFGS_MAXCOR`, `LBFGS_FTOL`, `LBFGS_GTOL`, `LBFGS_MAXLS`
 - `OPINF_REG_W`, `OPINF_REG_H`, `OPINF_REG_B`, `OPINF_REG_C`

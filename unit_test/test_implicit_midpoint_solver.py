@@ -18,6 +18,7 @@ from goattm.solvers.implicit_midpoint import (  # noqa: E402
     rollout_implicit_midpoint,
     rollout_implicit_midpoint_to_observation_times,
     solve_implicit_midpoint_step,
+    solve_implicit_midpoint_step_homotopy,
     solve_implicit_midpoint_step_with_retry,
 )
 
@@ -53,6 +54,39 @@ class ImplicitMidpointSolverTest(unittest.TestCase):
         residual = implicit_midpoint_residual(dynamics, u_prev, u_next, dt=0.05)
         self.assertTrue(info.success)
         self.assertLess(np.linalg.norm(residual), 1e-10)
+
+    def test_homotopy_recovers_when_direct_newton_iteration_budget_is_too_small(self) -> None:
+        a = np.array(
+            [
+                [-0.24945607, -0.01838933, 0.06439626],
+                [0.00969872, -0.15398846, 0.02885519],
+                [-0.03182318, 0.02709761, -0.21582977],
+            ],
+            dtype=float,
+        )
+        mu_h = np.array(
+            [-0.16119456, 0.04858366, -0.7629652, 0.59608305, -0.33554484, 0.50013471, 0.06816056, 0.76601654],
+            dtype=float,
+        )
+        c = np.array([-0.32998471, -0.15589743, 0.16888456], dtype=float)
+        u_prev = np.array([-1.10373555, 0.41396072, 0.7708152], dtype=float)
+        dt = 0.1
+
+        dynamics = QuadraticDynamics(a=a, mu_h=mu_h, c=c)
+        _, direct_info = solve_implicit_midpoint_step(dynamics, u_prev, dt=dt, max_iter=1)
+        homotopy_next, homotopy_info = solve_implicit_midpoint_step_homotopy(
+            dynamics,
+            u_prev,
+            dt=dt,
+            max_iter=8,
+            initial_lambda_step=0.1,
+            min_lambda_step=1e-4,
+        )
+
+        self.assertFalse(direct_info.success)
+        self.assertTrue(homotopy_info.success)
+        self.assertLess(np.linalg.norm(implicit_midpoint_residual(dynamics, u_prev, homotopy_next, dt=dt)), 1e-10)
+        self.assertTrue(np.all(np.isfinite(homotopy_next)))
 
     def test_rollout_reaches_final_time_with_expected_step_count(self) -> None:
         a = -0.3 * np.eye(2)

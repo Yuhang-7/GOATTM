@@ -1,301 +1,303 @@
-# GOATTM Implementation Description
+# GOATTM Library Description
 
-This document gives a more detailed implementation-level description of the current `GOATTM` library.
-It is intentionally more operational than the scope notes: the goal is to make it easy to understand
-what the code is doing, how the pieces fit together, and where the remaining risks are.
+This document gives a code-faithful description of the current `GOATTM` library.
+It is intended to help future prompting, design discussions, and onboarding stay aligned
+with what the repository actually implements today.
 
-## 1. High-level architecture
+## 1. What the library is
 
-The library is organized into a few main layers.
+`GOATTM` is a reduced-order modeling and QoI-training library centered on:
+
+- latent quadratic dynamics,
+- quadratic decoders from latent states to QoIs,
+- exact discrete derivatives for selected time integrators,
+- decoder best-response reduction, and
+- optimization workflows that can run in serial or sample-parallel MPI mode.
+
+The package is not just a collection of experiments. It already exposes a real public API
+through `src/goattm/__init__.py`, with reusable components for data loading, preprocessing,
+rollout, loss evaluation, reduced optimization, and training logs/checkpoints.
+
+## 2. Main package structure
 
 ### `core/`
 
-This layer contains pure algebraic utilities:
+Pure algebra and parameterization helpers live here. This includes:
 
-- quadratic feature construction
-- compressed quadratic representations
-- `mu_H` parameterization
-- stabilized linear parameterization
-  \[
-  A = -S S^T + W
-  \]
-- pullback maps from explicit matrix gradients back to structured parameters
+- quadratic feature construction,
+- compressed quadratic tensor representations,
+- `mu_h` parameterization utilities,
+- stabilized linear parameterization of the form `A = -S S^T + W`,
+- pullback maps from explicit matrix gradients to structured parameters.
 
-The key design choice here is that the structured parameterization is the public one, but most
-solver and derivative assembly logic still works with explicit matrix blocks internally because that
-keeps the calculus simple.
+This layer is intentionally low level and mostly NumPy-only.
 
 ### `models/`
 
-This layer defines the reduced dynamics and decoder objects.
+This layer defines the state-space and decoder objects:
 
-- `QuadraticDynamics`
-- `StabilizedQuadraticDynamics`
-- `QuadraticDecoder`
+- `QuadraticDynamics`,
+- `StabilizedQuadraticDynamics`,
+- `QuadraticDecoder`.
 
-`StabilizedQuadraticDynamics` is a wrapper over an explicit `QuadraticDynamics` instance.
-It exposes the same `rhs`, `rhs_jacobian`, and quadratic helper interfaces, but stores the
-trainable linear block in stabilized coordinates.
+`StabilizedQuadraticDynamics` stores the linear block in structured stabilized coordinates
+but still exposes explicit state-space operators such as `rhs` and Jacobian-related helpers.
 
 ### `solvers/`
 
-This layer contains time discretization logic.
+This layer contains rollout and tangent/discrete-adjoint support for the available time integrators.
 
-Originally only `implicit_midpoint` existed.
-The current code now also supports `explicit_euler`.
+The current public dispatcher supports three integrators:
 
-Important files:
+- `implicit_midpoint`,
+- `explicit_euler`,
+- `rk4`.
 
-- `implicit_midpoint.py`
-- `explicit_euler.py`
-- `time_integration.py`
+This is an important correction relative to older notes: the library is no longer only a
+midpoint-plus-explicit-Euler codebase. `rk4` is wired into the public time-integration layer,
+the loss layer, and the training configuration, and `ReducedQoiTrainerConfig` currently defaults
+to `rk4`.
 
-`time_integration.py` provides the dispatch layer. This is the piece that makes the time integrator
-a configurable option rather than something hard-coded into the workflow.
+The implicit-midpoint nonlinear solve now has a homotopy continuation fallback.  The solver first
+tries the direct Newton solve for the full midpoint residual.  If that fails, it tracks the root of
+
+`F_lambda(u_next) = u_next - u_prev - lambda * dt * f((u_prev + u_next) / 2)`
+
+from `lambda=0` to `lambda=1`, using a default lambda step of `0.1` and halving the step locally
+when a subproblem fails.  This is meant to keep Newton on the physical root branch rather than
+jumping to a far-field spurious root of the quadratic implicit equation.
 
 ### `losses/`
 
-This layer contains trajectory-level QoI loss evaluation and the exact discrete adjoint machinery
-for the currently supported time integrators.
+This layer evaluates trajectory-level QoI losses and assembles first-order derivatives.
 
-Important file:
+Important responsibilities include:
 
-- `qoi_loss.py`
+- trapezoidal observation weighting,
+- decoder partial assembly,
+- state loss derivatives,
+- exact discrete adjoint recursion,
+- exact first-order dynamics gradient assembly for supported integrators.
 
-It is responsible for:
-
-- observation-time trapezoidal QoI loss
-- decoder gradients
-- state-space loss gradients
-- discrete adjoint recursion
-- exact first-order dynamics gradient assembly
+At the first-order level, the implementation supports midpoint, explicit Euler, and RK4 branches.
 
 ### `problems/`
 
-This is the workflow layer that builds optimization-ready problems from data manifests.
+This is the reduced-objective workflow layer. It contains:
 
-Important files:
+- decoder normal-equation assembly/solve,
+- dataset-level loss-and-gradient evaluation,
+- decoder best-response reduction,
+- reduced objective preparation,
+- reduced gradient and Hessian-action evaluation.
 
-- `decoder_normal_equation.py`
-- `qoi_dataset_problem.py`
-- `reduced_qoi_best_response.py`
+This layer is the bridge between local derivative formulas and optimization-ready objectives.
 
-This layer handles:
+One subtle but important caveat:
 
-- distributed forward rollout over the dataset
-- decoder normal-equation best response
-- reduced objective evaluation
-- gradient assembly with `mu_f = mu_f^*(mu_g)`
-- Hessian-action assembly
-- caching
+- the higher-level reduced-objective workflow accepts all public time integrators;
+- some lower-level helper routines are still specialized.
+
+For example, `decoder_normal_equation.py` currently rolls trajectories with
+`rollout_implicit_midpoint_to_observation_times`, so that helper is still midpoint-specific even
+though the broader training stack is more general.
 
 ### `data/`
 
-This layer defines the `.npz` dataset schema and dataset splitting utilities.
+This layer defines the `.npz` dataset contract and manifest helpers.
 
-Important pieces:
+Current data support includes:
 
-- `NpzQoiSample`
-- `NpzSampleManifest`
-- explicit or seed-based train/test split
-- cubic spline input interpolation
+- `NpzQoiSample`,
+- `NpzSampleManifest`,
+- reproducible train/test splits,
+- explicit train/test splits by sample id,
+- cubic-spline input interpolation,
+- piecewise-linear input interpolation,
+- save/load helpers for samples and manifests.
+
+The expected sample payload is latent-state initial data plus QoI observations, with optional
+time-varying inputs and free-form metadata.
 
 ### `preprocess/`
 
-This layer takes raw data and prepares it for reduced training.
+This layer prepares datasets and initial models before training.
 
-It currently contains:
+Implemented capabilities include:
 
-- training-statistics normalization
-- materialized normalized train/test artifacts
-- constrained least squares for energy-preserving quadratic fitting
-- `OpInf` initialization
+- train-set normalization for QoIs and optional inputs,
+- materialization of normalized train/test datasets,
+- constrained least-squares helpers for energy-preserving quadratic structure,
+- `OpInf`-based initialization of a reduced stabilized model,
+- optional latent embedding construction before regression.
+
+Normalization is currently centered max-absolute scaling rather than z-score scaling.  For each
+QoI/input dimension, the train-set mean is subtracted and the centered values are divided by
+`max_train_abs / target_max_abs`, with `target_max_abs=0.9` by default.  This keeps the normalized
+training set within about `[-0.9, 0.9]` per dimension while still recording the scale needed for
+denormalization.
+
+`OpInf` preprocessing is more than a single regression call: it can also normalize data,
+materialize latent datasets, validate forward rollouts, and record initialization provenance.
 
 ### `train/`
 
-This layer builds the actual optimization interface.
+This layer exposes the optimization and logging interface.
 
-Important pieces:
+Key components include:
 
-- `ReducedQoiTrainer`
-- `ReducedQoiTrainerConfig`
-- optimizer adapters
-- run logging
-- timing summaries
-- checkpoints
+- `ReducedQoiTrainer`,
+- `ReducedQoiTrainerConfig`,
+- updater configs for Adam, gradient descent, L-BFGS, and Newton-action steps,
+- metrics logging,
+- timing summaries,
+- checkpoints,
+- run-directory provenance records.
 
-## 2. Data workflow
+The trainer is designed around the reduced objective in which decoder parameters are treated
+as an inner best response to the current dynamics parameters.
 
-The intended user-facing data workflow is:
+## 3. Data and preprocessing workflow
 
-1. Provide raw `.npz` samples.
-2. Build a manifest.
-3. Optionally split train/test explicitly, or let the library do it from a seed.
-4. Apply training-statistics normalization through `preprocess/`.
-5. Optionally run `OpInf` initialization.
-6. Train on the resulting latent or normalized manifests.
+The intended workflow is roughly:
 
-The key point is that normalization is no longer expected to happen outside the library.
-The preprocess stage is intended to own that responsibility, and the run directory now records
-whether preprocessing was applied.
+1. Build or load a `.npz` manifest.
+2. Split the dataset into train/test sets, either explicitly or from a seed.
+3. Optionally compute normalization statistics and materialize normalized artifacts.
+4. Optionally run `OpInf` initialization to produce a latent dataset, an initialized dynamics model,
+   and an initialized decoder.
+5. Train using the reduced QoI objective on the resulting manifests.
 
-## 3. Reduced optimization workflow
+Two clarifications matter here:
 
-The central optimization object is the reduced objective
+- normalization is now a library-owned preprocessing step, not something that must happen outside;
+- the preprocessing stage writes artifacts and provenance so later runs can be reconstructed.
 
-\[
-J(\mu_g) = J(\mu_f^*(\mu_g), \mu_g),
-\]
+## 4. Optimization model
 
-where the decoder parameters are treated as an inner best response.
+The central training object is the reduced best-response objective
 
-The current workflow is:
+`J(mu_g) = J(mu_f*(mu_g), mu_g)`,
 
-1. Fix `mu_g`.
-2. Run forward rollout on the training set.
-3. Assemble and solve the decoder normal equation.
-4. Evaluate QoI data loss and decoder regularization.
-5. Compute the reduced first derivative with the GOAM-style outer gradient path.
-6. Optionally compute an exact Hessian-action.
+where the decoder parameters are solved as an inner problem for each current choice of dynamics
+parameters.
 
-The most important implementation decision here is that the training path no longer uses the old
-slow basis-sweep reduced gradient as its default.
-That older path is still useful for verification and some research experiments, but the default
-optimization route is now the faster reduced objective gradient chain.
+Operationally, the workflow is:
 
-## 4. Time-integrator dispatch
+1. choose dynamics parameters,
+2. roll out trajectories over the dataset,
+3. solve the decoder normal equation,
+4. evaluate the QoI loss and regularization terms,
+5. assemble the reduced gradient,
+6. optionally assemble a reduced Hessian action or explicit Hessian.
 
-The current code preserves the old midpoint path and adds an explicit-Euler path as a selectable option.
+This is one of the main design differences from the older GOAM-style code: the library is built
+around a reusable reduced-objective workflow instead of only one-off experiment scripts.
 
-Supported values:
-
-- `implicit_midpoint`
-- `explicit_euler`
-
-This choice now enters through the evaluator and trainer configuration, rather than being hidden in
-the solver calls.
-
-That means:
-
-- old workflows remain available
-- new workflows can switch integrators without rewriting upper layers
-- testing and benchmarking can compare integrators under the same optimization interface
-
-## 5. First-order and second-order derivatives
+## 5. Derivatives and second-order support
 
 ### First order
 
-For each supported time integrator, the code computes the **exact discrete adjoint** for the chosen
-discretization and uses that to assemble the first-order dynamics gradient.
-
-This is important: the implemented gradient is not based on discretizing a continuous-time adjoint
-after the fact.
+For supported branches, the implementation uses exact discrete derivatives of the chosen
+time discretization. It does not merely discretize a continuous-time adjoint afterward.
 
 ### Second order
 
-The library also supports exact Hessian-action evaluation for the reduced objective.
+The library also supports reduced Hessian-action evaluation, and the trainer exposes Newton-style
+updates that can use either Hessian actions or an explicitly assembled reduced Hessian.
 
-The main ingredients are:
+This second-order machinery is present for midpoint, explicit Euler, and RK4 paths in the main
+reduced-objective evaluator.
 
-- tangent forward rollout
-- incremental discrete adjoint
-- differentiation of the parameter pullback terms
+## 6. Distributed execution
 
-The midpoint and explicit-Euler branches use different discrete formulas, but both are assembled in
-the same `ReducedObjectiveWorkflow` / evaluator interface.
+MPI support is sample-parallel.
 
-## 6. MPI and distributed execution
+Each rank owns a subset of manifest entries, loads only its local samples, computes local
+contributions, and participates in collective reductions.
 
-Distributed execution is currently sample-parallel.
+Manifest partitioning is round-robin by sample index (`idx % world_size == rank`).  It is not
+locked to one ODE per rank: a rank may own many samples, one sample, or no samples, depending on
+`ntrain` and MPI world size.
 
-Each rank:
+Typical distributed patterns include:
 
-- owns a static subset of the manifest
-- loads only its own local samples
-- computes local rollout and gradient contributions
-- participates in global reductions
+- dataset loss accumulation,
+- decoder normal-equation assembly,
+- reduced gradient accumulation,
+- Hessian-action accumulation.
 
-The decoder normal equation is built in this way:
+L-BFGS is root-led.  Only rank 0 owns the SciPy `minimize(..., method="L-BFGS-B")` object.  Worker
+ranks sit in a command loop and respond to root broadcasts such as `evaluate`, `snapshot`, `stop`,
+and `abort`.  This avoids the previous confusing situation where every MPI rank appeared to own an
+independent optimizer state.
 
-1. local normal matrix / RHS assembly
-2. `allreduce`
-3. root solve
-4. broadcast decoder parameters back to all ranks
+Forward rollout failures are collective-safe.  Each rank catches failures from any local sample,
+records sample id/index/path/reason, and then all ranks participate in failure collection.  During
+L-BFGS objective evaluation, a failed rollout returns a large penalty objective/gradient to steer
+the optimizer away from the candidate point.  Failures during mandatory snapshots or initialization
+are treated as abort conditions because those points are being accepted or recorded.
 
-The optimizer control flow is replicated, but the expensive data evaluations are distributed.
-Logging and checkpoint writing are root-only.
+Logging and checkpoint writing are primarily root-rank responsibilities.
 
-## 7. Logging and provenance
+## 7. Provenance and run artifacts
 
-Each training run creates a run directory.
+Training runs create output directories with records such as:
 
-Typical files are:
+- `config.json`,
+- `split.json`,
+- `preprocess.json`,
+- `metrics.jsonl`,
+- `summary.txt`,
+- `timing_summary.txt`,
+- `timing_summary.json`,
+- checkpoints,
+- failure records,
+- stdout/stderr logs.
 
-- `config.json`
-- `split.json`
-- `preprocess.json`
-- `stdout.log`
-- `stderr.log`
-- `metrics.jsonl`
-- `summary.txt`
-- `timing_summary.txt`
-- `timing_summary.json`
-- `initial_parameters.npz`
-- `checkpoints/`
-- `failures/`
+This is a meaningful strength of the current codebase: it aims to make experiments replayable
+instead of relying on ad hoc notebook state.
 
-The goal is that a failed or successful run can later be reconstructed without guessing:
+## 8. What is strong today
 
-- what data split was used
-- what preprocess was applied
-- what optimizer settings were used
-- what dynamics/decoder parameters were active
+The current library is strongest in:
 
-## 8. Current strengths
+- structured latent quadratic parameterization,
+- reduced best-response optimization organization,
+- discrete derivative support across multiple integrators,
+- root-led L-BFGS with MPI sample-parallel dataset evaluation,
+- preprocessing and initialization provenance,
+- centered max-absolute normalization that keeps normalized training data bounded,
+- implicit-midpoint homotopy fallback for difficult nonlinear solves,
+- test-oriented development around rollout/derivative correctness.
 
-At this point the library is strongest in these areas:
+## 9. What should be described carefully
 
-- structured reduced-model parameterization
-- distributed decoder best-response solve
-- reduced objective gradient / Hessian-action workflow
-- experiment logging and checkpointing
-- exact discrete-derivative testing culture
+The library description should avoid overstating a few things:
 
-The testing story is substantially better than in the old library because Taylor tests, unit tests,
-and workflow-level smoke tests are now part of normal development.
+- not every low-level helper is fully integrator-agnostic yet;
+- `OpInf` initialization can still produce models whose forward rollout is numerically fragile;
+- explicit schemes can be limited by stability regions even when adjoint formulas are correct;
+- implicit midpoint is more robust with homotopy fallback, but this does not remove all nonlinear
+  solve or bad-parameter failure modes;
+- L-BFGS penalty handling treats failed candidate rollouts as infeasible points; if a data sample is
+  intrinsically bad, that should be diagnosed separately rather than hidden as an optimizer issue;
+- some modules still reflect active research iteration rather than a fully frozen product API.
 
-## 9. Current weaknesses / risks
+So the right framing is:
 
-The main remaining risks are not hidden calculus bugs in the parts already Taylor-tested.
-They are more often:
+- the repository already contains a substantial reusable library,
+- the public workflow is broader than the old midpoint-only or explicit-Euler-only notes suggest,
+- but a few internals still encode narrower assumptions and should be documented honestly.
 
-- bad initialization quality
-- unstable latent dynamics from `OpInf`
-- integrator stability limits for certain initialized models
-- optimizer trial points leaving the numerically safe region
+## 10. Recommended prompt framing for future work
 
-This is especially visible when a coarse or poor `OpInf` initialization is combined with a
-non-A-stable explicit scheme.
+When prompting against this repository, it is more accurate to describe `GOATTM` as:
 
-## 10. Recent explicit-Euler branch status
+`A reduced-order modeling and reduced-QoI training library for quadratic latent dynamics, with
+structured parameterizations, multiple time integrators, exact discrete derivatives, decoder
+best-response optimization, bounded preprocessing normalization, root-led MPI L-BFGS training, and
+homotopy-guarded implicit nonlinear solves.`
 
-The explicit-Euler branch is now fully wired through the first-order and second-order derivative
-pipelines and validated by unit tests and Taylor tests.
-
-However, the current `OpInf`-initialized optimization demo can still fail at the very first forward
-evaluation because the initialized latent dynamics are too large in norm for the requested explicit
-Euler step size.
-
-That is a modeling / initialization stability problem, not an adjoint-formula problem.
-
-## 11. Suggested near-term next steps
-
-The most valuable next improvements are:
-
-1. make `OpInf` initialization quality checks stricter
-2. add safer scaling or projection on initialized latent dynamics
-3. add automatic fallback logic when an explicit integrator is requested for a clearly unstable initialization
-4. benchmark explicit Euler against midpoint under matched datasets and step sizes
-
-These are the changes most likely to convert the current implementation from “correct and testable”
-to “robust for the more difficult demos”.
+That description is closer to the current code than framing it as only an explicit-Euler branch,
+only a midpoint implementation, or only an `OpInf` experiment sandbox.

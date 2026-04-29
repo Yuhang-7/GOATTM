@@ -19,6 +19,7 @@ from .implicit_midpoint import (
     rollout_implicit_midpoint_tangent_from_base_rollout,
     rollout_implicit_midpoint_to_observation_times,
     solve_implicit_midpoint_step,
+    solve_implicit_midpoint_step_homotopy,
     solve_implicit_midpoint_step_with_retry,
 )
 from .rk4 import (
@@ -65,6 +66,7 @@ __all__ = [
     "rollout_to_final_time",
     "rollout_to_observation_times",
     "solve_implicit_midpoint_step",
+    "solve_implicit_midpoint_step_homotopy",
     "solve_implicit_midpoint_step_with_retry",
     "TimeIntegrator",
     "validate_time_integrator",
