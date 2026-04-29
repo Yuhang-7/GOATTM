@@ -10,8 +10,13 @@ The problem setting matches the small 10/10 workflow:
 - Raw data is normalized before OpInf initialization.
 - OpInf uses midpoint finite-difference regression for `A,H,B,c`.
 - `S` is initialized as identity in the stabilized dynamics.
-- OpInf forward validation and training both use `rk4`.
+- OpInf forward validation and training use `implicit_midpoint` by default.
 - Training uses L-BFGS and writes train/test loss plus relative error.
+
+This wrapper is geared toward compute-node execution:
+
+- It activates conda env `fenicsx-clean` by default.
+- It writes outputs under `demo/outputs/reduced_qoi_optimization_demo` by default.
 
 Run the default 10 train / 10 test case:
 
@@ -32,8 +37,8 @@ LATENT_RANK=10 bash demo/run_reduced_qoi_demo.sh 10 10
 ```
 
 By default the wrapper uses `mpirun -n NTRAIN`, so each train case gets one MPI
-rank. If the train set is larger than the available MPI slots, override the
-rank count:
+rank when no allocation is detected. If the train set is larger than the
+available MPI slots, override the rank count:
 
 ```bash
 MPI_RANKS=20 bash demo/run_reduced_qoi_demo.sh 100 100 --max-iterations 50
@@ -51,6 +56,7 @@ Useful Python options:
 - Model and solver setting:
 - `--latent-rank 4`
 - `--max-dt 0.01`
+- `--time-integrator implicit_midpoint`
 
 - Optimization setting:
 - `--optimizer lbfgs`
@@ -79,11 +85,14 @@ Useful Python options:
 
 Useful shell variables:
 
-- `MPI_RANKS`, default `NTRAIN`
-- `LATENT_RANK`, default `4`
+- `MPI_RANKS`, default to the launcher allocation when available, otherwise `NTRAIN`
+- `CONDA_ENV_NAME`, default `fenicsx-clean`
+- `GOATTM_SKIP_CONDA_ACTIVATE=1` to skip activation when the env is already active
+- `LATENT_RANK`, default `10`
 - `OPTIMIZER`, default `lbfgs`
-- `MAX_ITERATIONS`, default `50`
+- `MAX_ITERATIONS`, default `500`
 - `MAX_DT`, default `0.01`
+- `TIME_INTEGRATOR`, default `implicit_midpoint`
 - `SEED`, default `20260428`
 - `LBFGS_MAXCOR`, `LBFGS_FTOL`, `LBFGS_GTOL`, `LBFGS_MAXLS`
 - `OPINF_REG_W`, `OPINF_REG_H`, `OPINF_REG_B`, `OPINF_REG_C`
@@ -91,6 +100,8 @@ Useful shell variables:
 - `DYNAMICS_REG_S`, `DYNAMICS_REG_W`, `DYNAMICS_REG_MU_H`, `DYNAMICS_REG_B`, `DYNAMICS_REG_C`
 - `OUTPUT_DIR`, default `demo/outputs/reduced_qoi_optimization_demo`
 
-Outputs are written under `demo/outputs/reduced_qoi_optimization_demo` by
-default. The latest top-level summary is `latest_summary.json`; per-run logs,
-metrics, checkpoints, and OpInf logs are linked from that summary.
+Outputs are written under the selected `OUTPUT_DIR`. The latest top-level
+summary is `latest_summary.json`; per-run logs, loss histories
+(`loss_history.csv` and `loss_history.md`), metrics, checkpoints, timing
+summaries, OpInf logs, and the human-readable `optimization_report.md` are
+linked from that summary.

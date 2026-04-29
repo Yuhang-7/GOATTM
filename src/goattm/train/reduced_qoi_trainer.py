@@ -893,41 +893,208 @@ class ReducedQoiTrainer:
         if snapshot.iteration % self.config.checkpoint_every == 0 or snapshot.iteration == self.config.max_iterations or is_best:
             self.logger.save_checkpoint(snapshot, best_snapshot, is_best=is_best)
 
-    def _train_with_lbfgs(self, initial_dynamics: DynamicsLike) -> tuple[ReducedQoiTrainingSnapshot, ReducedQoiTrainingSnapshot]:
-        current_template = initial_dynamics
-        initial_result = self.gradient_calculator.evaluate(initial_dynamics)
-        initial_snapshot = self._evaluate_snapshot(
-            iteration=0,
-            dynamics=initial_dynamics,
-            step_norm=0.0,
-            train_result=initial_result,
-        )
-        best_snapshot = initial_snapshot
-        self._record_snapshot(initial_snapshot, best_snapshot, is_best=True)
+    def _lbfgs_evaluate_vector(self, dynamics_template: DynamicsLike, vector: np.ndarray) -> ReducedQoiBestResponseResult:
+        candidate = np.asarray(vector, dtype=np.float64).copy()
+        dynamics = dynamics_from_parameter_vector(dynamics_template, candidate)
+        return self.gradient_calculator.evaluate(dynamics)
 
+    def _lbfgs_snapshot_from_vector(
+        self,
+        dynamics_template: DynamicsLike,
+        vector: np.ndarray,
+        iteration: int,
+        step_norm: float,
+        train_result: ReducedQoiBestResponseResult | None = None,
+    ) -> ReducedQoiTrainingSnapshot:
+        candidate = np.asarray(vector, dtype=np.float64).copy()
+        dynamics = dynamics_from_parameter_vector(dynamics_template, candidate)
+        if train_result is None:
+            train_result = self.gradient_calculator.evaluate(dynamics)
+        return self._evaluate_snapshot(
+            iteration=iteration,
+            dynamics=dynamics,
+            step_norm=step_norm,
+            train_result=train_result,
+        )
+
+    def _lbfgs_command_failure_record(self, exc: Exception) -> dict[str, Any]:
+        record: dict[str, Any] = {
+            "rank": self.context.rank,
+            "type": type(exc).__name__,
+            "message": str(exc),
+        }
+        if isinstance(exc, ForwardRolloutFailure):
+            record.update(
+                {
+                    "sample_index": exc.sample_index,
+                    "sample_id": exc.sample_id,
+                    "sample_path": exc.sample_path,
+                    "final_time": exc.final_time,
+                    "reason": exc.reason,
+                }
+            )
+        return record
+
+    def _lbfgs_collect_command_failures(
+        self,
+        local_failure: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], ...]:
+        return tuple(item for item in self.context.allgather_object(local_failure) if item is not None)
+
+    @staticmethod
+    def _format_lbfgs_command_failures(failures: tuple[dict[str, Any], ...]) -> str:
+        pieces = []
+        for failure in failures:
+            sample_piece = ""
+            if "sample_id" in failure:
+                sample_piece = f" sample={failure['sample_id']} index={failure['sample_index']}"
+            pieces.append(
+                f"rank={failure['rank']} {failure['type']}: {failure['message']}{sample_piece}"
+            )
+        return " | ".join(pieces)
+
+    def _run_lbfgs_worker_loop(
+        self,
+        initial_dynamics: DynamicsLike,
+        optimizer_root: int,
+    ) -> tuple[ReducedQoiTrainingSnapshot, ReducedQoiTrainingSnapshot]:
+        final_snapshot: ReducedQoiTrainingSnapshot | None = None
+        best_snapshot: ReducedQoiTrainingSnapshot | None = None
+        while True:
+            command = self.context.bcast_object(None, root=optimizer_root)
+            if not isinstance(command, dict):
+                raise RuntimeError(f"Invalid root-led L-BFGS command: {command!r}")
+            op = command.get("op")
+            if op == "evaluate":
+                try:
+                    self._lbfgs_evaluate_vector(initial_dynamics, np.asarray(command["vector"], dtype=np.float64))
+                    local_failure = None
+                except Exception as exc:
+                    local_failure = self._lbfgs_command_failure_record(exc)
+                self._lbfgs_collect_command_failures(local_failure)
+            elif op == "snapshot":
+                try:
+                    final_snapshot = self._lbfgs_snapshot_from_vector(
+                        initial_dynamics,
+                        np.asarray(command["vector"], dtype=np.float64),
+                        iteration=int(command["iteration"]),
+                        step_norm=float(command["step_norm"]),
+                    )
+                    if best_snapshot is None or self._is_better(final_snapshot, best_snapshot):
+                        best_snapshot = final_snapshot
+                    local_failure = None
+                except Exception as exc:
+                    local_failure = self._lbfgs_command_failure_record(exc)
+                self._lbfgs_collect_command_failures(local_failure)
+            elif op == "stop":
+                if final_snapshot is None or best_snapshot is None:
+                    raise RuntimeError("Root-led L-BFGS worker stopped before receiving any successful snapshot.")
+                return final_snapshot, best_snapshot
+            elif op == "abort":
+                message = command.get("message", "unknown root-side failure")
+                raise RuntimeError(f"Root-led L-BFGS aborted on optimizer root: {message}")
+            else:
+                raise RuntimeError(f"Unknown root-led L-BFGS command: {op!r}")
+
+    def _train_with_lbfgs(self, initial_dynamics: DynamicsLike) -> tuple[ReducedQoiTrainingSnapshot, ReducedQoiTrainingSnapshot]:
+        optimizer_root = 0
+        using_workers = self.context.size > 1
+        if using_workers and self.context.rank != optimizer_root:
+            return self._run_lbfgs_worker_loop(initial_dynamics, optimizer_root=optimizer_root)
+
+        current_template = initial_dynamics
         last_eval_vector: np.ndarray | None = None
         last_eval_result: ReducedQoiBestResponseResult | None = None
-        last_logged_vector = dynamics_parameter_vector(initial_dynamics).copy()
+        x0 = dynamics_parameter_vector(initial_dynamics)
+        last_logged_vector = x0.copy()
         previous_callback_vector = last_logged_vector.copy()
         callback_iteration = 0
         lbfgs_failure_count = 0
 
-        def evaluate(vector: np.ndarray) -> ReducedQoiBestResponseResult:
+        def local_evaluate(vector: np.ndarray) -> ReducedQoiBestResponseResult:
             nonlocal last_eval_vector, last_eval_result
             candidate = np.asarray(vector, dtype=np.float64).copy()
             if last_eval_vector is not None and np.array_equal(candidate, last_eval_vector):
                 return last_eval_result  # type: ignore[return-value]
-            dynamics = dynamics_from_parameter_vector(current_template, candidate)
-            result = self.gradient_calculator.evaluate(dynamics)
+            result = self._lbfgs_evaluate_vector(current_template, candidate)
             last_eval_vector = candidate
             last_eval_result = result
             return result
+
+        def dispatch_evaluate(vector: np.ndarray) -> ReducedQoiBestResponseResult:
+            candidate = np.asarray(vector, dtype=np.float64).copy()
+            if last_eval_vector is not None and np.array_equal(candidate, last_eval_vector):
+                return last_eval_result  # type: ignore[return-value]
+            if using_workers:
+                self.context.bcast_object({"op": "evaluate", "vector": candidate}, root=optimizer_root)
+            local_failure = None
+            result = None
+            try:
+                result = local_evaluate(candidate)
+            except Exception as exc:
+                local_failure = self._lbfgs_command_failure_record(exc)
+                local_exception = exc
+            else:
+                local_exception = None
+            if using_workers:
+                failures = self._lbfgs_collect_command_failures(local_failure)
+                if failures:
+                    if local_exception is not None:
+                        raise local_exception
+                    raise RuntimeError(
+                        "L-BFGS evaluation failed on worker rank: "
+                        + self._format_lbfgs_command_failures(failures)
+                    )
+            if local_exception is not None:
+                raise local_exception
+            return result  # type: ignore[return-value]
+
+        def dispatch_snapshot(iteration: int, vector: np.ndarray, step_norm: float) -> ReducedQoiTrainingSnapshot:
+            candidate = np.asarray(vector, dtype=np.float64).copy()
+            if using_workers:
+                self.context.bcast_object(
+                    {
+                        "op": "snapshot",
+                        "vector": candidate,
+                        "iteration": int(iteration),
+                        "step_norm": float(step_norm),
+                    },
+                    root=optimizer_root,
+                )
+            local_failure = None
+            snapshot = None
+            try:
+                train_result = local_evaluate(candidate)
+                snapshot = self._lbfgs_snapshot_from_vector(
+                    current_template,
+                    candidate,
+                    iteration=iteration,
+                    step_norm=step_norm,
+                    train_result=train_result,
+                )
+            except Exception as exc:
+                local_failure = self._lbfgs_command_failure_record(exc)
+                local_exception = exc
+            else:
+                local_exception = None
+            if using_workers:
+                failures = self._lbfgs_collect_command_failures(local_failure)
+                if failures:
+                    if local_exception is not None:
+                        raise local_exception
+                    raise RuntimeError(
+                        "L-BFGS snapshot evaluation failed on worker rank: "
+                        + self._format_lbfgs_command_failures(failures)
+                    )
+            if local_exception is not None:
+                raise local_exception
+            return snapshot  # type: ignore[return-value]
 
         def objective_and_gradient(vector: np.ndarray) -> tuple[float, np.ndarray]:
             nonlocal lbfgs_failure_count
             candidate = np.asarray(vector, dtype=np.float64).copy()
             try:
-                result = evaluate(candidate)
+                result = dispatch_evaluate(candidate)
                 return float(result.objective_value), np.asarray(result.gradient, dtype=np.float64)
             except Exception as exc:
                 lbfgs_failure_count += 1
@@ -950,6 +1117,7 @@ class ReducedQoiTrainer:
                             "failing_sample_index": exc.sample_index,
                             "failing_sample_path": exc.sample_path,
                             "failing_sample_final_time": exc.final_time,
+                            "failing_sample_reason": exc.reason,
                         }
                     )
                 if self.context.rank == 0:
@@ -978,16 +1146,9 @@ class ReducedQoiTrainer:
             nonlocal callback_iteration, best_snapshot, last_logged_vector, previous_callback_vector
             callback_iteration += 1
             candidate = np.asarray(vector, dtype=np.float64).copy()
-            dynamics = dynamics_from_parameter_vector(current_template, candidate)
-            result = evaluate(candidate)
             step_norm = float(np.linalg.norm(candidate - previous_callback_vector))
             previous_callback_vector = candidate
-            snapshot = self._evaluate_snapshot(
-                iteration=callback_iteration,
-                dynamics=dynamics,
-                step_norm=step_norm,
-                train_result=result,
-            )
+            snapshot = dispatch_snapshot(callback_iteration, candidate, step_norm)
             if self._is_better(snapshot, best_snapshot):
                 best_snapshot = snapshot
                 is_best = True
@@ -996,41 +1157,60 @@ class ReducedQoiTrainer:
             self._record_snapshot(snapshot, best_snapshot, is_best=is_best)
             last_logged_vector = candidate
 
-        x0 = dynamics_parameter_vector(initial_dynamics)
-        minimize(
-            objective_and_gradient,
-            x0=x0,
-            method="L-BFGS-B",
-            jac=True,
-            callback=callback,
-            options={
-                "maxiter": self.config.max_iterations,
-                "maxcor": self.config.lbfgs.maxcor,
-                "ftol": self.config.lbfgs.ftol,
-                "gtol": self.config.lbfgs.gtol,
-                "maxls": self.config.lbfgs.maxls,
-            },
-        )
+        try:
+            initial_snapshot = dispatch_snapshot(iteration=0, vector=x0, step_norm=0.0)
+            best_snapshot = initial_snapshot
+            self._record_snapshot(initial_snapshot, best_snapshot, is_best=True)
 
-        final_vector = last_eval_vector if last_eval_vector is not None else x0
-        final_result = last_eval_result if last_eval_result is not None else initial_result
-        final_dynamics = dynamics_from_parameter_vector(current_template, final_vector)
-        final_iteration = callback_iteration
-        final_step_norm = float(np.linalg.norm(final_vector - previous_callback_vector))
-        final_snapshot = self._evaluate_snapshot(
-            iteration=final_iteration,
-            dynamics=final_dynamics,
-            step_norm=final_step_norm,
-            train_result=final_result,
-        )
-        if callback_iteration == 0 or not np.array_equal(final_vector, last_logged_vector):
-            if self._is_better(final_snapshot, best_snapshot):
-                best_snapshot = final_snapshot
-                is_best = True
-            else:
-                is_best = False
-            self._record_snapshot(final_snapshot, best_snapshot, is_best=is_best)
-        return final_snapshot, best_snapshot
+            minimize(
+                objective_and_gradient,
+                x0=x0,
+                method="L-BFGS-B",
+                jac=True,
+                callback=callback,
+                options={
+                    "maxiter": self.config.max_iterations,
+                    "maxcor": self.config.lbfgs.maxcor,
+                    "ftol": self.config.lbfgs.ftol,
+                    "gtol": self.config.lbfgs.gtol,
+                    "maxls": self.config.lbfgs.maxls,
+                },
+            )
+
+            final_vector = last_eval_vector if last_eval_vector is not None else x0
+            final_iteration = callback_iteration
+            final_step_norm = float(np.linalg.norm(final_vector - previous_callback_vector))
+            final_snapshot = dispatch_snapshot(
+                iteration=final_iteration,
+                vector=final_vector,
+                step_norm=final_step_norm,
+            )
+            if callback_iteration == 0 or not np.array_equal(final_vector, last_logged_vector):
+                if self._is_better(final_snapshot, best_snapshot):
+                    best_snapshot = final_snapshot
+                    is_best = True
+                else:
+                    is_best = False
+                self._record_snapshot(final_snapshot, best_snapshot, is_best=is_best)
+            if using_workers:
+                self.context.bcast_object(
+                    {"op": "stop"},
+                    root=optimizer_root,
+                )
+            return final_snapshot, best_snapshot
+        except Exception as exc:
+            if using_workers:
+                try:
+                    self.context.bcast_object(
+                        {
+                            "op": "abort",
+                            "message": f"{type(exc).__name__}: {exc}",
+                        },
+                        root=optimizer_root,
+                    )
+                except Exception:
+                    pass
+            raise
 
     def train(self, initial_dynamics: DynamicsLike) -> ReducedQoiTrainingResult:
         function_timer = FunctionTimer()

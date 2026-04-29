@@ -18,6 +18,7 @@ from goattm.models.stabilized_quadratic_dynamics import StabilizedQuadraticDynam
 from goattm.problems.reduced_qoi_best_response import (  # noqa: E402
     DecoderTikhonovRegularization,
     DynamicsTikhonovRegularization,
+    ForwardRolloutFailure,
     ObservationAlignedBestResponseEvaluator,
     dynamics_from_parameter_vector,
     dynamics_parameter_vector,
@@ -276,6 +277,38 @@ class ReducedQoiBestResponseTest(unittest.TestCase):
             self.assertLessEqual(first_slope, 2.30)
             self.assertGreaterEqual(second_slope, 1.70)
             self.assertLessEqual(second_slope, 2.30)
+
+    def test_forward_rollout_failure_identifies_one_bad_sample_in_local_shard(self) -> None:
+        rng = np.random.default_rng(7005)
+        truth_dynamics, truth_decoder = self._build_truth_problem(rng)
+        candidate_dynamics = self._perturb_dynamics(truth_dynamics, scale=0.05, rng=rng)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            manifest_path = self._write_dataset(root, truth_dynamics, truth_decoder, rng)
+            bad_sample_path = root / "sample_1.npz"
+            with np.load(bad_sample_path, allow_pickle=True) as data:
+                payload = {key: data[key] for key in data.files}
+            payload["input_values"] = np.column_stack([payload["input_values"], payload["input_values"]])
+            np.savez(bad_sample_path, **payload)
+
+            evaluator = ObservationAlignedBestResponseEvaluator(
+                manifest=manifest_path,
+                max_dt=0.04,
+                context=DistributedContext(),
+                dt_shrink=0.5,
+                dt_min=1e-12,
+                tol=1e-12,
+                max_iter=30,
+            )
+            with self.assertRaises(ForwardRolloutFailure) as failure_context:
+                evaluator.get_forward_rollouts(candidate_dynamics)
+
+            failure = failure_context.exception
+            self.assertEqual(failure.sample_id, "sample-1")
+            self.assertEqual(failure.sample_index, 1)
+            self.assertIn("sample_1.npz", failure.sample_path)
+            self.assertIn("ValueError", failure.reason)
 
     def _build_truth_problem(
         self,

@@ -87,12 +87,16 @@ class ForwardRolloutFailure(RuntimeError):
     sample_id: str
     sample_path: str
     final_time: float
+    reason: str = ""
 
     def __str__(self) -> str:
-        return (
+        message = (
             f"Forward rollout failed for sample '{self.sample_id}' "
             f"(index={self.sample_index}, path='{self.sample_path}') at time {self.final_time}."
         )
+        if self.reason:
+            message += f" Reason: {self.reason}"
+        return message
 
 
 @dataclass(frozen=True)
@@ -349,25 +353,36 @@ class ObservationAlignedBestResponseEvaluator:
         local_sample_ids: list[str] = []
         local_failure: ForwardRolloutFailure | None = None
         for sample_index, sample_id, sample_path, sample in self._local_samples:
-            input_function = sample.build_input_function()
-            rollout, observation_indices = rollout_to_observation_times(
-                dynamics=dynamics,
-                u0=sample.u0,
-                observation_times=sample.observation_times,
-                max_dt=self.max_dt,
-                input_function=input_function,
-                time_integrator=self.time_integrator,
-                dt_shrink=self.dt_shrink,
-                dt_min=self.dt_min,
-                tol=self.tol,
-                max_iter=self.max_iter,
-            )
+            try:
+                input_function = sample.build_input_function()
+                rollout, observation_indices = rollout_to_observation_times(
+                    dynamics=dynamics,
+                    u0=sample.u0,
+                    observation_times=sample.observation_times,
+                    max_dt=self.max_dt,
+                    input_function=input_function,
+                    time_integrator=self.time_integrator,
+                    dt_shrink=self.dt_shrink,
+                    dt_min=self.dt_min,
+                    tol=self.tol,
+                    max_iter=self.max_iter,
+                )
+            except Exception as exc:
+                local_failure = ForwardRolloutFailure(
+                    sample_index=sample_index,
+                    sample_id=sample_id,
+                    sample_path=str(sample_path),
+                    final_time=float("nan"),
+                    reason=f"{type(exc).__name__}: {exc}",
+                )
+                break
             if not rollout.success:
                 local_failure = ForwardRolloutFailure(
                     sample_index=sample_index,
                     sample_id=sample_id,
                     sample_path=str(sample_path),
                     final_time=float(rollout.final_time),
+                    reason="time integrator returned success=False",
                 )
                 break
             local_rollouts.append(
@@ -398,6 +413,7 @@ class ObservationAlignedBestResponseEvaluator:
                     sample_id=local_failure.sample_id,
                     sample_path=local_failure.sample_path,
                     final_time=local_failure.final_time,
+                    reason=local_failure.reason,
                 )
             raise RuntimeError("Forward rollout failed on another MPI rank: " + " | ".join(failures))
 

@@ -9,7 +9,7 @@ The demo reproduces the small maintained problem setting at larger scale:
   q_j(t) = exp(a_j p(t)) + b_j (p(t)-a_j)^2;
 * OpInf initialization on normalized data;
 * stabilized quadratic reduced dynamics with S initialized as identity;
-* RK4 rollouts for OpInf validation and training;
+* implicit-midpoint rollouts for OpInf validation and training by default;
 * L-BFGS optimization with global MPI reductions.
 
 When launched with ``mpirun -n NTRAIN``, the train manifest is distributed so
@@ -18,6 +18,7 @@ same manifest partitioning logic still works.
 """
 
 import argparse
+import csv
 import json
 import os
 import sys
@@ -61,6 +62,7 @@ class DemoConfig:
     # Model and solver setting.
     latent_rank: int
     max_dt: float
+    time_integrator: str
 
     # Optimization setting.
     optimizer: str
@@ -108,6 +110,12 @@ def parse_args() -> DemoConfig:
     parser.add_argument("--seed", type=int, default=20260428, help="Synthetic dataset RNG seed.")
     parser.add_argument("--latent-rank", type=int, default=4, help="Reduced latent dimension.")
     parser.add_argument("--max-dt", type=float, default=0.01, help="Maximum rollout time step.")
+    parser.add_argument(
+        "--time-integrator",
+        default="implicit_midpoint",
+        choices=("implicit_midpoint", "explicit_euler", "rk4"),
+        help="Time integrator for OpInf validation and GOATTM training rollouts.",
+    )
     parser.add_argument("--optimizer", default="lbfgs", choices=("lbfgs", "adam", "gradient_descent", "newton_action"))
     parser.add_argument("--max-iterations", type=int, default=50, help="Optimizer max iterations.")
     parser.add_argument("--lbfgs-maxcor", type=int, default=20, help="L-BFGS memory size.")
@@ -136,6 +144,7 @@ def parse_args() -> DemoConfig:
         seed=args.seed,
         latent_rank=args.latent_rank,
         max_dt=args.max_dt,
+        time_integrator=args.time_integrator,
         optimizer=args.optimizer,
         max_iterations=args.max_iterations,
         lbfgs_maxcor=args.lbfgs_maxcor,
@@ -281,6 +290,207 @@ def split_train_test(manifest: NpzSampleManifest, config: DemoConfig):
     )
 
 
+def _format_optional_float(value: object, precision: int = 6) -> str:
+    if value is None:
+        return "NA"
+    try:
+        return f"{float(value):.{precision}g}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _read_json_if_present(path: Path | str | None) -> dict[str, object]:
+    if path is None:
+        return {}
+    json_path = Path(path)
+    if not json_path.exists():
+        return {}
+    return json.loads(json_path.read_text(encoding="utf-8"))
+
+
+def _read_jsonl_records(path: Path) -> list[dict[str, object]]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _top_timing_records(path: Path, limit: int = 8) -> list[dict[str, object]]:
+    timing = _read_json_if_present(path)
+    records = timing.get("records", [])
+    if not isinstance(records, list):
+        return []
+    return [record for record in records[:limit] if isinstance(record, dict)]
+
+
+LOSS_HISTORY_COLUMNS = (
+    "iteration",
+    "train_objective",
+    "train_data_loss",
+    "train_relative_error",
+    "test_data_loss",
+    "test_relative_error",
+    "gradient_norm",
+    "step_norm",
+    "best_iteration",
+    "best_train_objective",
+    "best_train_relative_error",
+    "best_test_data_loss",
+    "best_test_relative_error",
+)
+
+
+def write_loss_history(
+    csv_path: Path,
+    markdown_path: Path,
+    metrics_records: list[dict[str, object]],
+) -> None:
+    """Write per-iteration loss history in machine- and human-readable forms."""
+    with csv_path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=LOSS_HISTORY_COLUMNS)
+        writer.writeheader()
+        for record in metrics_records:
+            writer.writerow({column: record.get(column, "") for column in LOSS_HISTORY_COLUMNS})
+
+    lines = [
+        "# GOATTM Loss History",
+        "",
+        "| iter | train obj | train data | train rel | test data | test rel | grad norm | step norm | best iter |",
+        "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for record in metrics_records:
+        lines.append(
+            "| "
+            f"{record.get('iteration', 'NA')} | "
+            f"{_format_optional_float(record.get('train_objective'))} | "
+            f"{_format_optional_float(record.get('train_data_loss'))} | "
+            f"{_format_optional_float(record.get('train_relative_error'))} | "
+            f"{_format_optional_float(record.get('test_data_loss'))} | "
+            f"{_format_optional_float(record.get('test_relative_error'))} | "
+            f"{_format_optional_float(record.get('gradient_norm'))} | "
+            f"{_format_optional_float(record.get('step_norm'))} | "
+            f"{record.get('best_iteration', 'NA')} |"
+        )
+    lines.append("")
+    markdown_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def write_optimization_report(
+    report_path: Path,
+    summary: dict[str, object],
+    metrics_records: list[dict[str, object]],
+    timing_json_path: Path,
+    training_summary_path: Path,
+) -> None:
+    """Write a human-readable optimization report next to the raw logs."""
+    initial_record = metrics_records[0] if metrics_records else {}
+    final_record = metrics_records[-1] if metrics_records else {}
+    best_test_record = (
+        min(
+            (record for record in metrics_records if record.get("test_data_loss") is not None),
+            key=lambda record: float(record["test_data_loss"]),
+        )
+        if metrics_records
+        else {}
+    )
+    opinf_summary = _read_json_if_present(summary.get("opinf_summary_path"))
+    failure_dir = Path(str(summary["run_output_dir"])) / "failures"
+    failure_count = len(tuple(failure_dir.glob("*.json"))) if failure_dir.exists() else 0
+    timing_records = _top_timing_records(timing_json_path)
+
+    lines = [
+        "# GOATTM Optimization Report",
+        "",
+        "## Run",
+        f"- Run output: `{summary['run_output_dir']}`",
+        f"- MPI world size: `{summary['mpi_world_size']}`",
+        f"- Train/test samples: `{summary['requested_ntrain']}` / `{summary['requested_ntest']}`",
+        f"- Latent rank: `{summary['latent_rank']}`",
+        f"- Time integrator: `{summary['time_integrator']}`",
+        f"- Max dt: `{summary['max_dt']}`",
+        f"- Optimizer: `{summary['optimizer']}`",
+        f"- Max iterations: `{summary['max_iterations']}`",
+        "",
+        "## OpInf Initialization",
+        f"- Regression relative residual: `{_format_optional_float(summary.get('opinf_regression_relative_residual'))}`",
+        f"- Validation success: `{opinf_summary.get('validation_success', 'NA')}`",
+        f"- Validation attempts: `{opinf_summary.get('validation_attempt_count', 'NA')}`",
+        f"- Final regularization: `{json.dumps(opinf_summary.get('final_regularization', {}), sort_keys=True)}`",
+        f"- OpInf summary: `{summary.get('opinf_summary_path', 'NA')}`",
+        "",
+        "## Optimization Metrics",
+        "| metric | initial | final | best-test snapshot |",
+        "| --- | ---: | ---: | ---: |",
+        (
+            "| train objective | "
+            f"{_format_optional_float(initial_record.get('train_objective'))} | "
+            f"{_format_optional_float(final_record.get('train_objective'))} | "
+            f"{_format_optional_float(best_test_record.get('train_objective'))} |"
+        ),
+        (
+            "| train data loss | "
+            f"{_format_optional_float(initial_record.get('train_data_loss'))} | "
+            f"{_format_optional_float(final_record.get('train_data_loss'))} | "
+            f"{_format_optional_float(best_test_record.get('train_data_loss'))} |"
+        ),
+        (
+            "| train relative error | "
+            f"{_format_optional_float(initial_record.get('train_relative_error'))} | "
+            f"{_format_optional_float(final_record.get('train_relative_error'))} | "
+            f"{_format_optional_float(best_test_record.get('train_relative_error'))} |"
+        ),
+        (
+            "| test data loss | "
+            f"{_format_optional_float(initial_record.get('test_data_loss'))} | "
+            f"{_format_optional_float(final_record.get('test_data_loss'))} | "
+            f"{_format_optional_float(best_test_record.get('test_data_loss'))} |"
+        ),
+        (
+            "| test relative error | "
+            f"{_format_optional_float(initial_record.get('test_relative_error'))} | "
+            f"{_format_optional_float(final_record.get('test_relative_error'))} | "
+            f"{_format_optional_float(best_test_record.get('test_relative_error'))} |"
+        ),
+        (
+            "| gradient norm | "
+            f"{_format_optional_float(initial_record.get('gradient_norm'))} | "
+            f"{_format_optional_float(final_record.get('gradient_norm'))} | "
+            f"{_format_optional_float(best_test_record.get('gradient_norm'))} |"
+        ),
+        "",
+        "## Stability And Failures",
+        f"- L-BFGS penalty evaluation failures: `{failure_count}`",
+        f"- Failure records: `{failure_dir}`",
+        "",
+        "## Runtime Hotspots",
+        "| name | calls | total seconds | average seconds |",
+        "| --- | ---: | ---: | ---: |",
+    ]
+    for record in timing_records:
+        lines.append(
+            "| "
+            f"`{record.get('name', 'unknown')}` | "
+            f"{int(record.get('call_count', 0))} | "
+            f"{_format_optional_float(record.get('total_seconds'))} | "
+            f"{_format_optional_float(record.get('average_seconds'))} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Raw Files",
+            f"- Loss history CSV: `{summary.get('loss_history_csv_path', 'NA')}`",
+            f"- Loss history Markdown: `{summary.get('loss_history_markdown_path', 'NA')}`",
+            f"- Metrics JSONL: `{summary['metrics_path']}`",
+            f"- Training summary: `{training_summary_path}`",
+            f"- Timing summary: `{summary.get('timing_summary_path', timing_json_path.with_suffix('.txt'))}`",
+            f"- Stdout log: `{summary['stdout_log_path']}`",
+            f"- Stderr log: `{summary['stderr_log_path']}`",
+            f"- Best checkpoint: `{summary['best_checkpoint_path']}`",
+            "",
+        ]
+    )
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+
+
 def run_demo(config: DemoConfig) -> dict[str, object] | None:
     context = distributed_context_from_environment()
     config.output_dir.mkdir(parents=True, exist_ok=True)
@@ -313,7 +523,7 @@ def run_demo(config: DemoConfig) -> dict[str, object] | None:
             coeff_b=config.opinf_reg_b,
             coeff_c=config.opinf_reg_c,
         ),
-        validation_time_integrator="rk4",
+        validation_time_integrator=config.time_integrator,
         max_regularization_retries=8,
         decoder_regularization=DecoderTikhonovRegularization(
             coeff_v1=config.decoder_reg_v1,
@@ -324,7 +534,7 @@ def run_demo(config: DemoConfig) -> dict[str, object] | None:
 
     trainer_config = ReducedQoiTrainerConfig(
         output_dir=config.output_dir / "runs",
-        time_integrator="rk4",
+        time_integrator=config.time_integrator,
         run_name_prefix=f"goattm_demo_{config.optimizer}_r{config.latent_rank}_ntrain{config.ntrain}_ntest{config.ntest}",
         optimizer=config.optimizer,
         max_iterations=config.max_iterations,
@@ -368,6 +578,9 @@ def run_demo(config: DemoConfig) -> dict[str, object] | None:
         return None
 
     metrics_records = [json.loads(line) for line in result.metrics_path.read_text(encoding="utf-8").splitlines()]
+    loss_history_csv_path = result.output_dir / "loss_history.csv"
+    loss_history_markdown_path = result.output_dir / "loss_history.md"
+    write_loss_history(loss_history_csv_path, loss_history_markdown_path, metrics_records)
     initial_record = metrics_records[0]
     final_record = metrics_records[-1]
     summary: dict[str, object] = {
@@ -433,9 +646,23 @@ def run_demo(config: DemoConfig) -> dict[str, object] | None:
         "run_output_dir": str(result.output_dir),
         "best_checkpoint_path": str(result.best_checkpoint_path),
         "metrics_path": str(result.metrics_path),
+        "loss_history_csv_path": str(loss_history_csv_path),
+        "loss_history_markdown_path": str(loss_history_markdown_path),
+        "training_summary_path": str(result.summary_path),
+        "timing_summary_path": str(result.timing_summary_path),
+        "timing_json_path": str(result.timing_json_path),
         "stdout_log_path": str(result.stdout_log_path),
         "stderr_log_path": str(result.stderr_log_path),
     }
+    optimization_report_path = result.output_dir / "optimization_report.md"
+    summary["optimization_report_path"] = str(optimization_report_path)
+    write_optimization_report(
+        optimization_report_path,
+        summary=summary,
+        metrics_records=metrics_records,
+        timing_json_path=result.timing_json_path,
+        training_summary_path=result.summary_path,
+    )
     summary_path = config.output_dir / "latest_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
     print(json.dumps(summary, indent=2, ensure_ascii=True))

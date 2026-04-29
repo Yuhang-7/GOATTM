@@ -35,6 +35,8 @@ results/
 checkpoints/
 workflow_dataset/
 mpi_dataset/
+application/swe_problem/data/processed_data/
+application/swe_problem/data/processed_data_smoke/
 
 # Chinese prompt/report drafts; keep the English/body files tracked.
 *_zhcn*
