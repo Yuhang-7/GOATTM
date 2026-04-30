@@ -4,6 +4,7 @@ from .optimize_reduced_qoi import ReducedQoiOptimizationRun, optimize_reduced_qo
 from .reduced_qoi_trainer import (
     AdamUpdater,
     AdamUpdaterConfig,
+    BfgsUpdaterConfig,
     GradientDescentUpdater,
     GradientDescentUpdaterConfig,
     LbfgsUpdaterConfig,
@@ -21,6 +22,7 @@ from .reduced_qoi_trainer import (
 __all__ = [
     "AdamUpdater",
     "AdamUpdaterConfig",
+    "BfgsUpdaterConfig",
     "GradientDescentUpdater",
     "GradientDescentUpdaterConfig",
     "LbfgsUpdaterConfig",

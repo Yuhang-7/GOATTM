@@ -62,6 +62,14 @@ class LbfgsUpdaterConfig:
 
 
 @dataclass(frozen=True)
+class BfgsUpdaterConfig:
+    gtol: float = 1e-6
+    c1: float = 1e-4
+    c2: float = 0.9
+    xrtol: float = 1e-7
+
+
+@dataclass(frozen=True)
 class NewtonActionUpdaterConfig:
     hessian_mode: str = "action"
     damping: float = 1e-4
@@ -89,6 +97,7 @@ class ReducedQoiTrainerConfig:
     adam: AdamUpdaterConfig = field(default_factory=AdamUpdaterConfig)
     gradient_descent: GradientDescentUpdaterConfig = field(default_factory=GradientDescentUpdaterConfig)
     lbfgs: LbfgsUpdaterConfig = field(default_factory=LbfgsUpdaterConfig)
+    bfgs: BfgsUpdaterConfig = field(default_factory=BfgsUpdaterConfig)
     newton_action: NewtonActionUpdaterConfig = field(default_factory=NewtonActionUpdaterConfig)
 
 
@@ -464,6 +473,12 @@ class ReducedQoiTrainingLogger:
                 "gtol": config.lbfgs.gtol,
                 "maxls": config.lbfgs.maxls,
             },
+            "bfgs": {
+                "gtol": config.bfgs.gtol,
+                "c1": config.bfgs.c1,
+                "c2": config.bfgs.c2,
+                "xrtol": config.bfgs.xrtol,
+            },
             "newton_action": {
                 "hessian_mode": config.newton_action.hessian_mode,
                 "damping": config.newton_action.damping,
@@ -800,13 +815,13 @@ class ReducedQoiTrainer:
             self.updater = AdamUpdater(config.adam)
         elif config.optimizer == "gradient_descent":
             self.updater = GradientDescentUpdater(config.gradient_descent)
-        elif config.optimizer == "lbfgs":
+        elif config.optimizer in {"lbfgs", "bfgs"}:
             self.updater = None
         elif config.optimizer == "newton_action":
             self.updater = NewtonActionUpdater(config.newton_action)
         else:
             raise ValueError(
-                f"Unsupported optimizer '{config.optimizer}'. Supported optimizers are 'adam', 'gradient_descent', 'lbfgs', and 'newton_action'."
+                f"Unsupported optimizer '{config.optimizer}'. Supported optimizers are 'adam', 'gradient_descent', 'lbfgs', 'bfgs', and 'newton_action'."
             )
         logger = None
         if self.context.rank == 0:
@@ -996,7 +1011,33 @@ class ReducedQoiTrainer:
             else:
                 raise RuntimeError(f"Unknown root-led L-BFGS command: {op!r}")
 
-    def _train_with_lbfgs(self, initial_dynamics: DynamicsLike) -> tuple[ReducedQoiTrainingSnapshot, ReducedQoiTrainingSnapshot]:
+    def _scipy_quasi_newton_options(self) -> tuple[str, dict[str, float | int]]:
+        if self.config.optimizer == "lbfgs":
+            return (
+                "L-BFGS-B",
+                {
+                    "maxiter": self.config.max_iterations,
+                    "maxcor": self.config.lbfgs.maxcor,
+                    "ftol": self.config.lbfgs.ftol,
+                    "gtol": self.config.lbfgs.gtol,
+                    "maxls": self.config.lbfgs.maxls,
+                },
+            )
+        if self.config.optimizer == "bfgs":
+            return (
+                "BFGS",
+                {
+                    "maxiter": self.config.max_iterations,
+                    "gtol": self.config.bfgs.gtol,
+                    "xrtol": self.config.bfgs.xrtol,
+                },
+            )
+        raise RuntimeError(f"Unsupported SciPy quasi-Newton optimizer '{self.config.optimizer}'.")
+
+    def _train_with_scipy_quasi_newton(
+        self,
+        initial_dynamics: DynamicsLike,
+    ) -> tuple[ReducedQoiTrainingSnapshot, ReducedQoiTrainingSnapshot]:
         optimizer_root = 0
         using_workers = self.context.size > 1
         if using_workers and self.context.rank != optimizer_root:
@@ -1042,7 +1083,7 @@ class ReducedQoiTrainer:
                     if local_exception is not None:
                         raise local_exception
                     raise RuntimeError(
-                        "L-BFGS evaluation failed on worker rank: "
+                        f"{self.config.optimizer.upper()} evaluation failed on worker rank: "
                         + self._format_lbfgs_command_failures(failures)
                     )
             if local_exception is not None:
@@ -1083,7 +1124,7 @@ class ReducedQoiTrainer:
                     if local_exception is not None:
                         raise local_exception
                     raise RuntimeError(
-                        "L-BFGS snapshot evaluation failed on worker rank: "
+                        f"{self.config.optimizer.upper()} snapshot evaluation failed on worker rank: "
                         + self._format_lbfgs_command_failures(failures)
                     )
             if local_exception is not None:
@@ -1108,7 +1149,7 @@ class ReducedQoiTrainer:
                     "reference_parameter_norm": float(np.linalg.norm(reference)),
                     "candidate_parameter_norm": float(np.linalg.norm(candidate)),
                     "delta_norm": float(np.linalg.norm(delta)),
-                    "optimizer": "lbfgs",
+                    "optimizer": self.config.optimizer,
                 }
                 if isinstance(exc, ForwardRolloutFailure):
                     extra.update(
@@ -1123,7 +1164,7 @@ class ReducedQoiTrainer:
                 if self.context.rank == 0:
                     dynamics = dynamics_from_parameter_vector(current_template, candidate)
                     artifact_paths = self.logger.save_failure_artifact(
-                        name=f"lbfgs_eval_failure_{lbfgs_failure_count:04d}",
+                        name=f"{self.config.optimizer}_eval_failure_{lbfgs_failure_count:04d}",
                         dynamics=dynamics,
                         parameter_vector=candidate,
                         message=f"{type(exc).__name__}: {exc}",
@@ -1135,7 +1176,7 @@ class ReducedQoiTrainer:
                     artifact_text = "" if artifact_paths is None else f" Saved to {artifact_paths[0]} and {artifact_paths[1]}."
                     self.logger.log_stderr(
                         (
-                            f"L-BFGS evaluation failure #{lbfgs_failure_count}: "
+                            f"{self.config.optimizer.upper()} evaluation failure #{lbfgs_failure_count}: "
                             f"{type(exc).__name__}: {exc}. Returning penalty objective.{artifact_text}"
                         ),
                         echo=self.config.echo_progress,
@@ -1161,23 +1202,18 @@ class ReducedQoiTrainer:
             initial_snapshot = dispatch_snapshot(iteration=0, vector=x0, step_norm=0.0)
             best_snapshot = initial_snapshot
             self._record_snapshot(initial_snapshot, best_snapshot, is_best=True)
+            scipy_method, scipy_options = self._scipy_quasi_newton_options()
 
-            minimize(
+            opt_result = minimize(
                 objective_and_gradient,
                 x0=x0,
-                method="L-BFGS-B",
+                method=scipy_method,
                 jac=True,
                 callback=callback,
-                options={
-                    "maxiter": self.config.max_iterations,
-                    "maxcor": self.config.lbfgs.maxcor,
-                    "ftol": self.config.lbfgs.ftol,
-                    "gtol": self.config.lbfgs.gtol,
-                    "maxls": self.config.lbfgs.maxls,
-                },
+                options=scipy_options,
             )
 
-            final_vector = last_eval_vector if last_eval_vector is not None else x0
+            final_vector = np.asarray(opt_result.x, dtype=np.float64).copy()
             final_iteration = callback_iteration
             final_step_norm = float(np.linalg.norm(final_vector - previous_callback_vector))
             final_snapshot = dispatch_snapshot(
@@ -1226,8 +1262,8 @@ class ReducedQoiTrainer:
                     echo=self.config.echo_progress and self.context.rank == 0,
                 )
                 self.logger.write_initial_parameters(initial_dynamics, self.decoder_template)
-                if self.config.optimizer == "lbfgs":
-                    final_snapshot, best_snapshot = self._train_with_lbfgs(initial_dynamics)
+                if self.config.optimizer in {"lbfgs", "bfgs"}:
+                    final_snapshot, best_snapshot = self._train_with_scipy_quasi_newton(initial_dynamics)
                 else:
                     current_dynamics = initial_dynamics
                     best_snapshot = None

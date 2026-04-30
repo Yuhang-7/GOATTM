@@ -37,6 +37,10 @@ LBFGS_MAXCOR="${LBFGS_MAXCOR:-20}"
 LBFGS_FTOL="${LBFGS_FTOL:-1e-12}"
 LBFGS_GTOL="${LBFGS_GTOL:-1e-8}"
 LBFGS_MAXLS="${LBFGS_MAXLS:-30}"
+BFGS_GTOL="${BFGS_GTOL:-1e-6}"
+BFGS_C1="${BFGS_C1:-1e-4}"
+BFGS_C2="${BFGS_C2:-0.9}"
+BFGS_XRTOL="${BFGS_XRTOL:-1e-7}"
 
 activate_conda_env() {
   if [[ "${GOATTM_SKIP_CONDA_ACTIVATE}" == "1" ]]; then
@@ -83,6 +87,10 @@ PY_ARGS=(
   --lbfgs-ftol "${LBFGS_FTOL}"
   --lbfgs-gtol "${LBFGS_GTOL}"
   --lbfgs-maxls "${LBFGS_MAXLS}"
+  --bfgs-gtol "${BFGS_GTOL}"
+  --bfgs-c1 "${BFGS_C1}"
+  --bfgs-c2 "${BFGS_C2}"
+  --bfgs-xrtol "${BFGS_XRTOL}"
 )
 
 echo "Running SWE rank-8 demo from ${REPO_ROOT}"

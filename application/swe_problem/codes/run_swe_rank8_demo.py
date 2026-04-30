@@ -34,7 +34,7 @@ from goattm.data import NpzSampleManifest, load_npz_sample_manifest, make_npz_tr
 from goattm.preprocess import OpInfInitializationRegularization, initialize_reduced_model_via_opinf  # noqa: E402
 from goattm.problems import DecoderTikhonovRegularization, DynamicsTikhonovRegularization  # noqa: E402
 from goattm.runtime import DistributedContext  # noqa: E402
-from goattm.train import LbfgsUpdaterConfig, ReducedQoiTrainer, ReducedQoiTrainerConfig  # noqa: E402
+from goattm.train import BfgsUpdaterConfig, LbfgsUpdaterConfig, ReducedQoiTrainer, ReducedQoiTrainerConfig  # noqa: E402
 
 
 DEFAULT_MANIFEST_PATH = SWE_PROBLEM_ROOT / "data" / "processed_data" / "manifest.npz"
@@ -57,6 +57,10 @@ class SweDemoConfig:
     lbfgs_ftol: float
     lbfgs_gtol: float
     lbfgs_maxls: int
+    bfgs_gtol: float
+    bfgs_c1: float
+    bfgs_c2: float
+    bfgs_xrtol: float
     opinf_reg_w: float
     opinf_reg_h: float
     opinf_reg_b: float
@@ -81,13 +85,21 @@ def parse_args() -> SweDemoConfig:
     parser.add_argument("--latent-rank", type=int, default=8)
     parser.add_argument("--max-dt", type=float, default=1.0 / 600.0)
     parser.add_argument("--time-integrator", default="rk4", choices=("implicit_midpoint", "explicit_euler", "rk4"))
-    parser.add_argument("--optimizer", default="lbfgs", choices=("lbfgs", "adam", "gradient_descent", "newton_action"))
+    parser.add_argument(
+        "--optimizer",
+        default="lbfgs",
+        choices=("lbfgs", "bfgs", "adam", "gradient_descent", "newton_action"),
+    )
     parser.add_argument("--max-iterations", type=int, default=50)
     parser.add_argument("--normalization-target-max-abs", type=float, default=0.9)
     parser.add_argument("--lbfgs-maxcor", type=int, default=20)
     parser.add_argument("--lbfgs-ftol", type=float, default=1e-12)
     parser.add_argument("--lbfgs-gtol", type=float, default=1e-8)
     parser.add_argument("--lbfgs-maxls", type=int, default=30)
+    parser.add_argument("--bfgs-gtol", type=float, default=1e-6)
+    parser.add_argument("--bfgs-c1", type=float, default=1e-4)
+    parser.add_argument("--bfgs-c2", type=float, default=0.9)
+    parser.add_argument("--bfgs-xrtol", type=float, default=1e-7)
     parser.add_argument("--opinf-reg-w", type=float, default=1e-4)
     parser.add_argument("--opinf-reg-h", type=float, default=1e-4)
     parser.add_argument("--opinf-reg-b", type=float, default=1e-4)
@@ -126,6 +138,18 @@ def validate_config(config: SweDemoConfig) -> None:
         raise ValueError(f"max_iterations must be positive, got {config.max_iterations}")
     if config.normalization_target_max_abs <= 0.0:
         raise ValueError("normalization_target_max_abs must be positive.")
+    if config.lbfgs_maxcor <= 0:
+        raise ValueError(f"lbfgs_maxcor must be positive, got {config.lbfgs_maxcor}")
+    if config.lbfgs_maxls <= 0:
+        raise ValueError(f"lbfgs_maxls must be positive, got {config.lbfgs_maxls}")
+    if config.bfgs_gtol <= 0.0:
+        raise ValueError(f"bfgs_gtol must be positive, got {config.bfgs_gtol}")
+    if not (0.0 < config.bfgs_c1 < config.bfgs_c2 < 1.0):
+        raise ValueError(
+            f"BFGS line-search parameters must satisfy 0 < c1 < c2 < 1, got c1={config.bfgs_c1}, c2={config.bfgs_c2}"
+        )
+    if config.bfgs_xrtol < 0.0:
+        raise ValueError(f"bfgs_xrtol must be nonnegative, got {config.bfgs_xrtol}")
 
 
 def distributed_context_from_environment() -> DistributedContext:
@@ -259,6 +283,12 @@ def run_swe_demo(config: SweDemoConfig) -> dict[str, object] | None:
             gtol=config.lbfgs_gtol,
             maxls=config.lbfgs_maxls,
         ),
+        bfgs=BfgsUpdaterConfig(
+            gtol=config.bfgs_gtol,
+            c1=config.bfgs_c1,
+            c2=config.bfgs_c2,
+            xrtol=config.bfgs_xrtol,
+        ),
     )
     trainer = ReducedQoiTrainer(
         train_manifest=opinf_result.latent_train_manifest,
@@ -310,6 +340,18 @@ def run_swe_demo(config: SweDemoConfig) -> dict[str, object] | None:
         "max_dt": config.max_dt,
         "optimizer": config.optimizer,
         "max_iterations": config.max_iterations,
+        "lbfgs": {
+            "maxcor": config.lbfgs_maxcor,
+            "ftol": config.lbfgs_ftol,
+            "gtol": config.lbfgs_gtol,
+            "maxls": config.lbfgs_maxls,
+        },
+        "bfgs": {
+            "gtol": config.bfgs_gtol,
+            "c1": config.bfgs_c1,
+            "c2": config.bfgs_c2,
+            "xrtol": config.bfgs_xrtol,
+        },
         "normalization_target_max_abs": config.normalization_target_max_abs,
         "opinf_regression_relative_residual": float(opinf_result.regression_relative_residual),
         "opinf_summary_path": str(opinf_result.summary_path),

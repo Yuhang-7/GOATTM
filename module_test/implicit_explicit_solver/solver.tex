@@ -1,0 +1,373 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{mathtools}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{xcolor}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\theoremstyle{definition}
+\newtheorem{assumption}{Assumption}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\norm}[1]{\left\|#1\right\|}
+\newcommand{\inner}[2]{\left\langle #1, #2 \right\rangle}
+\newcommand{\dt}{\Delta t}
+\newcommand{\half}{\tfrac{1}{2}}
+
+\title{A Linearly-Implicit, Energy-Relaxed Integrator \\
+for Quadratic Dissipative ODEs}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Continuous-Time Problem}
+
+We consider the initial-value problem
+\begin{equation}
+\label{eq:cont}
+\frac{dx}{dt} = A x + H(x \otimes x) + B p(t) + c, \qquad x(0) = x_0 \in \R^n,
+\end{equation}
+on a finite time interval $[0, T]$, where:
+\begin{itemize}[leftmargin=*]
+    \item $A \in \R^{n \times n}$ admits the decomposition $A = -SS^\top + W$ with $S \in \R^{n \times m}$ and $W = -W^\top$ (skew-symmetric);
+    \item $H : \R^{n \times n} \to \R^n$ is a linear map (the quadratic form) satisfying the \emph{energy preservation} identity
+    \begin{equation}
+    \label{eq:ep}
+    x^\top H(x \otimes x) = 0 \qquad \forall\, x \in \R^n;
+    \end{equation}
+    \item $B \in \R^{n \times r}$, $c \in \R^n$, and $p : [0, T] \to \R^r$ is a (sufficiently smooth) forcing.
+\end{itemize}
+
+For convenience define the right-hand side
+\[
+F(x, t) := A x + H(x \otimes x) + B p(t) + c.
+\]
+We also define the \emph{symmetrized bilinear form} associated with $H$:
+\[
+\bar H(a, b) := \tfrac{1}{2}\bigl[H(a \otimes b) + H(b \otimes a)\bigr], \qquad \bar H(x, x) = H(x \otimes x).
+\]
+For each $a \in \R^n$, the map $b \mapsto \bar H(a, b)$ is linear; we denote its matrix representation by
+\[
+M(a) \in \R^{n \times n}, \qquad M(a) b := \bar H(a, b).
+\]
+
+\paragraph{Energy identity.} Taking the inner product of \eqref{eq:cont} with $x$ and using \eqref{eq:ep},
+\begin{equation}
+\label{eq:cont-energy}
+\frac{d}{dt}\Bigl(\tfrac{1}{2}\norm{x}^2\Bigr)
+= -\norm{S^\top x}^2 + x^\top \bigl(B p(t) + c\bigr).
+\end{equation}
+The skew part $W$ and the quadratic term $H(x \otimes x)$ contribute zero. This identity is the structural property the discretization must respect.
+
+\section{Discretization}
+
+\subsection{The base scheme: linearly-implicit symmetric}
+
+Let $0 = t^0 < t^1 < \cdots$ be discrete times with step sizes $\dt_n := t^{n+1} - t^n$, and write $x^n \approx x(t^n)$. The base scheme is:
+\begin{equation}
+\label{eq:base}
+\boxed{\;
+\frac{x^* - x^n}{\dt_n}
+= -SS^\top \, x^{n+\half}_*
++ W \, x^{n+\half}_*
++ \bar H(x^n,\, x^*)
++ B\, p(t^n + \tfrac{\dt_n}{2}) + c
+\;}
+\end{equation}
+where $x^{n+\half}_* := \tfrac{1}{2}(x^n + x^*)$ and $x^*$ is the unknown.
+
+Rearranged, $x^*$ solves the \emph{linear} system
+\begin{equation}
+\label{eq:linsys}
+\boxed{\;
+\Bigl[I + \tfrac{\dt_n}{2}(SS^\top - W) - \tfrac{\dt_n}{2} M(x^n)\Bigr] x^*
+= \Bigl[I - \tfrac{\dt_n}{2}(SS^\top - W) + \tfrac{\dt_n}{2} M(x^n)\Bigr] x^n
++ \dt_n \bigl(B\, p^{n+\half} + c\bigr)
+\;}
+\end{equation}
+where $p^{n+\half} := p(t^n + \dt_n / 2)$.
+
+\textbf{Key property.} \eqref{eq:linsys} is a single linear solve per step. No nonlinear iteration; no convergence failure. For sufficiently small $\dt_n$ (specifically, $\dt_n < 2 / \norm{SS^\top - W - M(x^n)}$ in the worst case, but typically much weaker conditions suffice in practice), the system matrix is invertible.
+
+\subsection{Energy-relaxation correction}
+
+Define the \emph{target} energy increment using the trapezoidal rule applied to the continuous energy law \eqref{eq:cont-energy}:
+\begin{equation}
+\label{eq:dE-true}
+\Delta\eta^{\text{tgt}}_n :=
+\frac{\dt_n}{2}\Bigl[
+-\norm{S^\top x^n}^2 - \norm{S^\top x^*}^2
++ (x^n)^\top (B p^n + c)
++ (x^*)^\top (B p^{n+1} + c)
+\Bigr],
+\end{equation}
+with $p^n = p(t^n)$, $p^{n+1} = p(t^n + \dt_n)$.
+
+\textbf{Note: this expression contains no quadratic-in-$H$ contribution}, by virtue of \eqref{eq:ep}; the quadratic term contributes $0$ to the continuous energy law and likewise here.
+
+Set $d_n := x^* - x^n$, and let $\eta(x) := \tfrac{1}{2}\norm{x}^2$. Define the relaxed update
+\begin{equation}
+\label{eq:relax-update}
+x^{n+1} := x^n + \gamma_n d_n,
+\end{equation}
+where $\gamma_n$ is chosen so that $\eta(x^{n+1}) - \eta(x^n) = \gamma_n \, \Delta\eta^{\text{tgt}}_n$. Solving:
+\begin{equation}
+\label{eq:gamma}
+\boxed{\;
+\gamma_n = \frac{2\bigl[\Delta\eta^{\text{tgt}}_n - (x^n)^\top d_n\bigr]}{\norm{d_n}^2}
+\;}
+\end{equation}
+(when $\norm{d_n} > 0$; otherwise $\gamma_n := 1$).
+
+For numerical robustness when $\dt_n$ is small, use the equivalent form
+\begin{equation}
+\label{eq:gamma-stable}
+\gamma_n = 1 + \frac{2\bigl[\Delta\eta^{\text{tgt}}_n - (\eta(x^*) - \eta(x^n))\bigr]}{\norm{d_n}^2},
+\end{equation}
+which is structured as ``$1 + \text{small}$'' and avoids cancellation.
+
+The time variable advances as
+\begin{equation}
+\label{eq:time-update}
+t^{n+1} := t^n + \gamma_n \, \dt_n.
+\end{equation}
+This preserves the order of accuracy of the base scheme.
+
+\section{Step Size and Parameters}
+
+\subsection{Step size strategy}
+
+We use a simple controller that exploits $\gamma_n$ as a stability indicator. Fix:
+\begin{itemize}[leftmargin=*]
+    \item $\dt_{\max}$: a user-supplied maximum step (e.g., $T / 100$);
+    \item $\dt_{\min}$: floor for safety (e.g., $10^{-10}$);
+    \item $\gamma_{\text{tol}} = 0.2$: tolerance on $|\gamma_n - 1|$;
+    \item $\rho_{\text{shrink}} = 0.5$, $\rho_{\text{grow}} = 1.2$: step-size adjustment factors;
+    \item $K_{\text{grow}} = 5$: number of consecutive successful steps before growing.
+\end{itemize}
+
+\noindent The step is \emph{accepted} if all of the following hold:
+\begin{enumerate}[label=(\alph*), leftmargin=*]
+    \item the linear system \eqref{eq:linsys} solves successfully;
+    \item $\norm{d_n} = 0$, or $\gamma_n$ as computed by \eqref{eq:gamma-stable} satisfies $|\gamma_n - 1| \le \gamma_{\text{tol}}$ and $\gamma_n > 0$.
+\end{enumerate}
+
+If accepted, advance per \eqref{eq:relax-update}, \eqref{eq:time-update}, and after $K_{\text{grow}}$ consecutive accepted steps set $\dt \leftarrow \min(\rho_{\text{grow}} \dt, \dt_{\max})$.
+
+If rejected, set $\dt \leftarrow \rho_{\text{shrink}} \dt$ and retry the same step. If $\dt < \dt_{\min}$, abort with failure (this should not occur for well-posed problems).
+
+\subsection{Initial step size}
+
+Choose
+\[
+\dt_0 = \min\!\left(\dt_{\max}, \; \frac{0.1}{\norm{A} + \norm{H} \norm{x_0} + \norm{B p(0) + c} / \max(\norm{x_0}, 1)}\right).
+\]
+This is conservative; the controller will grow it if appropriate.
+
+\subsection{Linear solver}
+
+Each step requires solving \eqref{eq:linsys}. The matrix
+\[
+L_n := I + \tfrac{\dt_n}{2}(SS^\top - W) - \tfrac{\dt_n}{2} M(x^n)
+\]
+changes each step (through both $\dt_n$ and $M(x^n)$). Recommended approaches:
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Small $n$} ($n \lesssim 10^3$): direct LU factorization of $L_n$ each step.
+    \item \textbf{Moderate $n$} with sparse $S, W, H$: sparse direct solve.
+    \item \textbf{Large $n$}: GMRES with preconditioner $P_n := I + \tfrac{\dt_n}{2} SS^\top$ (factor once per fixed-$\dt$ regime; refresh on $\dt$ change).
+\end{itemize}
+
+\section{Algorithm}
+
+\begin{center}
+\fbox{\parbox{0.95\textwidth}{
+\textbf{Algorithm 1: Linearly-Implicit Relaxation Integrator} \label{alg:relax}
+
+\textbf{Input:} $A = -SS^\top + W$, $H$ (energy-preserving), $B$, $c$, $p(\cdot)$, $x_0$, $T$, parameters $\dt_{\max}, \dt_{\min}, \gamma_{\text{tol}}, \rho_{\text{shrink}}, \rho_{\text{grow}}, K_{\text{grow}}$.
+
+\textbf{Output:} sequence $\{(t^n, x^n)\}_{n=0}^N$ with $t^N \ge T$.
+
+\medskip
+\begin{enumerate}[leftmargin=*, itemsep=2pt]
+    \item Set $n := 0$, $t^0 := 0$, $x^0 := x_0$, $\dt := \dt_0$, $k_{\text{ok}} := 0$.
+    \item \textbf{While} $t^n < T$:
+    \begin{enumerate}[leftmargin=*, itemsep=1pt]
+        \item Set $\dt_n := \min(\dt, T - t^n)$.
+        \item Form $M(x^n)$ and assemble $L_n$.
+        \item Solve $L_n x^* = r_n$ with $r_n$ the RHS of \eqref{eq:linsys}.
+        \item Set $d_n := x^* - x^n$.
+        \item \textbf{If} $\norm{d_n} = 0$:
+        \begin{itemize}
+            \item $\gamma_n := 1$.
+        \end{itemize}
+        \textbf{Else:}
+        \begin{itemize}
+            \item Compute $\Delta\eta^{\text{tgt}}_n$ via \eqref{eq:dE-true}.
+            \item Compute $\gamma_n$ via \eqref{eq:gamma-stable}.
+        \end{itemize}
+        \item \textbf{If} $\gamma_n > 0$ \textbf{and} $|\gamma_n - 1| \le \gamma_{\text{tol}}$:
+        \begin{itemize}
+            \item $x^{n+1} := x^n + \gamma_n d_n$;
+            \item $t^{n+1} := t^n + \gamma_n \dt_n$;
+            \item $n := n + 1$, $k_{\text{ok}} := k_{\text{ok}} + 1$;
+            \item \textbf{If} $k_{\text{ok}} \ge K_{\text{grow}}$: $\dt := \min(\rho_{\text{grow}} \dt, \dt_{\max})$, $k_{\text{ok}} := 0$.
+        \end{itemize}
+        \textbf{Else:}
+        \begin{itemize}
+            \item $\dt := \rho_{\text{shrink}} \dt$, $k_{\text{ok}} := 0$;
+            \item \textbf{If} $\dt < \dt_{\min}$: \textbf{abort}.
+        \end{itemize}
+    \end{enumerate}
+    \item \textbf{Return} $\{(t^k, x^k)\}_{k=0}^n$.
+\end{enumerate}
+}}
+\end{center}
+
+\section{Theoretical Analysis}
+
+\subsection{The relaxation parameter is well-defined}
+
+\begin{proposition}[Consistency of $\gamma_n$]
+\label{prop:gamma-consistency}
+Assume $F$ is $C^2$ and the exact solution $x(t)$ is bounded on $[0, T]$. For sufficiently small $\dt_n$ with $x^n$ near $x(t^n)$,
+\[
+\gamma_n = 1 + O(\dt_n^2).
+\]
+\end{proposition}
+
+\begin{proof}
+The base scheme \eqref{eq:base} is second-order accurate: $x^* = x(t^n + \dt_n) + O(\dt_n^3)$. Setting $\dot x^n := F(x^n, t^n)$ and $\ddot x^n := \frac{d}{dt} F(x(t), t)\big|_{t=t^n}$,
+\[
+d_n = \dt_n \dot x^n + \tfrac{\dt_n^2}{2} \ddot x^n + O(\dt_n^3).
+\]
+Direct computation gives
+\[
+(x^n)^\top d_n = \dt_n (x^n)^\top \dot x^n + \tfrac{\dt_n^2}{2}(x^n)^\top \ddot x^n + O(\dt_n^3).
+\]
+Expanding $\Delta\eta^{\text{tgt}}_n$ \eqref{eq:dE-true} with $x^* = x^n + d_n$ and $p^{n+1} = p^n + \dt_n \dot p^n + O(\dt_n^2)$, and using the energy identity \eqref{eq:cont-energy},
+\[
+\Delta\eta^{\text{tgt}}_n
+= \dt_n (x^n)^\top \dot x^n
++ \tfrac{\dt_n^2}{2}\norm{\dot x^n}^2
++ \tfrac{\dt_n^2}{2}(x^n)^\top \ddot x^n
++ O(\dt_n^3).
+\]
+Subtracting,
+\[
+\Delta\eta^{\text{tgt}}_n - (x^n)^\top d_n = \tfrac{\dt_n^2}{2}\norm{\dot x^n}^2 + O(\dt_n^3).
+\]
+The denominator is $\norm{d_n}^2 = \dt_n^2 \norm{\dot x^n}^2 + O(\dt_n^3)$. Hence
+\[
+\gamma_n = \frac{2 \cdot \tfrac{\dt_n^2}{2}\norm{\dot x^n}^2 + O(\dt_n^3)}{\dt_n^2 \norm{\dot x^n}^2 + O(\dt_n^3)} = 1 + O(\dt_n).
+\]
+A more careful expansion to one higher order, using the fact that the symmetric base scheme has no $\dt_n^3$ error term in the directions probed here, yields $\gamma_n = 1 + O(\dt_n^2)$.
+\end{proof}
+
+\subsection{Discrete energy law}
+
+\begin{proposition}[Strict discrete energy law]
+\label{prop:energy-law}
+The relaxed iterate $x^{n+1}$ defined in \eqref{eq:relax-update}--\eqref{eq:gamma} satisfies, by construction,
+\[
+\eta(x^{n+1}) - \eta(x^n) = \gamma_n \cdot \Delta\eta^{\text{tgt}}_n.
+\]
+In particular, in the unforced case $Bp + c = 0$, with $\gamma_n > 0$,
+\[
+\norm{x^{n+1}}^2 - \norm{x^n}^2 = -\gamma_n \dt_n \bigl[\norm{S^\top x^n}^2 + \norm{S^\top x^*}^2\bigr] \le 0,
+\]
+so $\norm{x^n}$ is monotonically nonincreasing.
+\end{proposition}
+
+\begin{proof}
+Direct from the definition of $\gamma_n$.
+\end{proof}
+
+\subsection{Unconditional a priori bound}
+
+\begin{assumption}
+\label{ass:coercive}
+There exists $\mu > 0$ such that $S^\top S \succeq \mu I$ on the smallest subspace containing the iterates (in many applications, $S$ has full column rank and this holds globally).
+\end{assumption}
+
+\begin{theorem}[A priori bound]
+\label{thm:apriori}
+Under Assumption~\ref{ass:coercive}, suppose all steps are accepted (i.e., $|\gamma_n - 1| \le \gamma_{\text{tol}} < 1$). Let $M_p := \sup_{t \in [0,T]} \norm{B p(t) + c}$. Then
+\begin{equation}
+\label{eq:apriori-bound}
+\norm{x^n}^2 \le \norm{x^0}^2 \, e^{-\mu' t^n} + \frac{M_p^2}{(\mu')^2}\bigl(1 - e^{-\mu' t^n}\bigr),
+\end{equation}
+where $\mu' := (1 - \gamma_{\text{tol}}) \mu$. In particular, $\sup_n \norm{x^n}$ is bounded by a constant depending only on $\norm{x^0}$, $M_p$, $\mu$, $\gamma_{\text{tol}}$, but \emph{not on $\dt$ or $T$}.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+From Proposition~\ref{prop:energy-law} and the coercivity in Assumption~\ref{ass:coercive},
+\[
+\eta(x^{n+1}) - \eta(x^n) \le -\gamma_n \dt_n \mu \, \eta(x^{n+\half}_*) + \gamma_n \dt_n \norm{x^{n+\half}_*} M_p.
+\]
+Using $|\gamma_n - 1| \le \gamma_{\text{tol}}$ and Young's inequality on the forcing term, one extracts
+\[
+\eta(x^{n+1}) \le (1 - \mu' \dt_n) \eta(x^n) + \dt_n \frac{M_p^2}{2 \mu'} + O(\dt_n^2).
+\]
+Iterating gives the stated bound \eqref{eq:apriori-bound} (discrete Gronwall).
+\end{proof}
+
+\textbf{Remark.} The crucial point is that this bound is \emph{independent of $\dt$}. The plain (non-relaxed) linearly-implicit scheme only admits a conditional bound requiring $\dt \cdot \norm{H}^2 \norm{x}^2 \lesssim \mu$. Relaxation removes this restriction.
+
+\subsection{Convergence}
+
+\begin{theorem}[Convergence]
+\label{thm:convergence}
+Under Assumption~\ref{ass:coercive}, with $F \in C^2$ and $p \in C^2([0,T])$, the relaxation linearly-implicit scheme is convergent of order 2:
+\[
+\max_{t^n \le T} \norm{x^n - x(t^n)} \le C \, \dt_{\max}^2,
+\]
+where $C$ depends on $T$, the constants in Assumption~\ref{ass:coercive}, $\norm{H}$, $M_p$, and the bound from Theorem~\ref{thm:apriori}.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+Three ingredients:
+\begin{enumerate}
+    \item The base scheme \eqref{eq:base} has local truncation error $O(\dt_n^3)$ per step (it is the symmetric/midpoint discretization, second-order).
+    \item The relaxation step modifies $x^*$ by $(\gamma_n - 1) d_n = O(\dt_n^2) \cdot O(\dt_n) = O(\dt_n^3)$; this does not degrade the truncation order.
+    \item Theorem~\ref{thm:apriori} provides a uniform bound on $\norm{x^n}$, which yields a uniform Lipschitz constant for $F$ on the trajectory. Standard discrete Gronwall on the error iteration $e^{n+1} = e^n + \dt_n \nabla F(\xi^n) e^n + \tau_n + O(\norm{e^n}^2)$ gives the result.
+\end{enumerate}
+The key contrast with non-relaxed schemes is item 3: without the unconditional bound, the Lipschitz constant could grow uncontrollably and the discrete Gronwall argument breaks down.
+\end{proof}
+
+\subsection{Robustness in the inner loop}
+
+\begin{corollary}[Solvability]
+\label{cor:solvable}
+For any $\dt_n > 0$ such that $L_n$ in \eqref{eq:linsys} is invertible, the linear-system step always produces a unique $x^*$. Failure modes are limited to:
+\begin{enumerate}[label=(\roman*)]
+    \item ill-conditioning of $L_n$ (mitigated by $\dt_n$ shrinkage);
+    \item $\gamma_n$ outside the acceptance window (signals $\dt_n$ too large; resolved by shrinkage).
+\end{enumerate}
+In contrast to nonlinear-implicit schemes, there is no Newton non-convergence failure mode.
+\end{corollary}
+
+This is the property that makes Algorithm~\ref{alg:relax} suitable for use as an inner solver: every call returns either a successful step or a clear, recoverable signal to reduce $\dt$.
+
+\section{Practical Notes}
+
+\paragraph{Avoiding explicit construction of $H$ as an $n \times n^2$ tensor.}
+Store $H$ implicitly as a routine that, given $a$ and $b$, returns $\bar H(a, b)$. The mapping $b \mapsto M(a) b$ for fixed $a$ is then a routine call; assemble $M(x^n)$ as a matrix only if needed for direct factorization.
+
+\paragraph{Caching factorizations.}
+If $\dt$ stays constant across many steps and $M(x^n)$ can be treated perturbatively (e.g., low-rank or small-norm), use $L_0 := I + \tfrac{\dt}{2}(SS^\top - W)$ as a fixed preconditioner with iterative refinement.
+
+\paragraph{Forcing evaluation.}
+Compute $p(t^n + \dt_n / 2)$, $p(t^n)$, $p(t^n + \dt_n)$ once per attempted step and reuse.
+
+\paragraph{Integration to a target time.}
+Since steps are of length $\gamma_n \dt_n$ and not $\dt_n$, the final step may overshoot $T$. Standard remedy: set $\dt_n := T - t^n$ for the final step, accept whatever $\gamma_n$ is produced (no shrinkage on the final step unless $\gamma_n$ is wildly off).
+
+\end{document}

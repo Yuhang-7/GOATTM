@@ -44,7 +44,7 @@ from goattm.data import (  # noqa: E402
 from goattm.preprocess import OpInfInitializationRegularization, initialize_reduced_model_via_opinf  # noqa: E402
 from goattm.problems import DecoderTikhonovRegularization, DynamicsTikhonovRegularization  # noqa: E402
 from goattm.runtime import DistributedContext  # noqa: E402
-from goattm.train import LbfgsUpdaterConfig, ReducedQoiTrainer, ReducedQoiTrainerConfig  # noqa: E402
+from goattm.train import BfgsUpdaterConfig, LbfgsUpdaterConfig, ReducedQoiTrainer, ReducedQoiTrainerConfig  # noqa: E402
 
 
 DEFAULT_OUTPUT_DIR = ROOT / "demo" / "outputs" / "reduced_qoi_optimization_demo"
@@ -72,6 +72,10 @@ class DemoConfig:
     lbfgs_ftol: float
     lbfgs_gtol: float
     lbfgs_maxls: int
+    bfgs_gtol: float
+    bfgs_c1: float
+    bfgs_c2: float
+    bfgs_xrtol: float
 
     # Regularization setting.
     opinf_reg_w: float
@@ -123,12 +127,20 @@ def parse_args() -> DemoConfig:
         choices=("implicit_midpoint", "explicit_euler", "rk4"),
         help="Time integrator for OpInf validation and GOATTM training rollouts.",
     )
-    parser.add_argument("--optimizer", default="lbfgs", choices=("lbfgs", "adam", "gradient_descent", "newton_action"))
+    parser.add_argument(
+        "--optimizer",
+        default="bfgs",
+        choices=("lbfgs", "bfgs", "adam", "gradient_descent", "newton_action"),
+    )
     parser.add_argument("--max-iterations", type=int, default=50, help="Optimizer max iterations.")
     parser.add_argument("--lbfgs-maxcor", type=int, default=20, help="L-BFGS memory size.")
     parser.add_argument("--lbfgs-ftol", type=float, default=1e-12, help="L-BFGS ftol.")
     parser.add_argument("--lbfgs-gtol", type=float, default=1e-8, help="L-BFGS gtol.")
     parser.add_argument("--lbfgs-maxls", type=int, default=30, help="L-BFGS max line-search steps.")
+    parser.add_argument("--bfgs-gtol", type=float, default=1e-6, help="BFGS gradient norm tolerance.")
+    parser.add_argument("--bfgs-c1", type=float, default=1e-4, help="BFGS Armijo line-search parameter.")
+    parser.add_argument("--bfgs-c2", type=float, default=0.9, help="BFGS curvature line-search parameter.")
+    parser.add_argument("--bfgs-xrtol", type=float, default=1e-7, help="BFGS relative step-size tolerance.")
     parser.add_argument("--opinf-reg-w", type=float, default=1e-4, help="OpInf W regularization.")
     parser.add_argument("--opinf-reg-h", type=float, default=1e-4, help="OpInf H regularization.")
     parser.add_argument("--opinf-reg-b", type=float, default=1e-4, help="OpInf B regularization.")
@@ -159,6 +171,10 @@ def parse_args() -> DemoConfig:
         lbfgs_ftol=args.lbfgs_ftol,
         lbfgs_gtol=args.lbfgs_gtol,
         lbfgs_maxls=args.lbfgs_maxls,
+        bfgs_gtol=args.bfgs_gtol,
+        bfgs_c1=args.bfgs_c1,
+        bfgs_c2=args.bfgs_c2,
+        bfgs_xrtol=args.bfgs_xrtol,
         opinf_reg_w=args.opinf_reg_w,
         opinf_reg_h=args.opinf_reg_h,
         opinf_reg_b=args.opinf_reg_b,
@@ -205,6 +221,14 @@ def validate_config(config: DemoConfig) -> None:
         raise ValueError(f"lbfgs_maxcor must be positive, got {config.lbfgs_maxcor}")
     if config.lbfgs_maxls <= 0:
         raise ValueError(f"lbfgs_maxls must be positive, got {config.lbfgs_maxls}")
+    if config.bfgs_gtol <= 0.0:
+        raise ValueError(f"bfgs_gtol must be positive, got {config.bfgs_gtol}")
+    if not (0.0 < config.bfgs_c1 < config.bfgs_c2 < 1.0):
+        raise ValueError(
+            f"BFGS line-search parameters must satisfy 0 < c1 < c2 < 1, got c1={config.bfgs_c1}, c2={config.bfgs_c2}"
+        )
+    if config.bfgs_xrtol < 0.0:
+        raise ValueError(f"bfgs_xrtol must be nonnegative, got {config.bfgs_xrtol}")
     regularization_values = (
         config.opinf_reg_w,
         config.opinf_reg_h,
@@ -560,6 +584,12 @@ def run_demo(config: DemoConfig) -> dict[str, object] | None:
             gtol=config.lbfgs_gtol,
             maxls=config.lbfgs_maxls,
         ),
+        bfgs=BfgsUpdaterConfig(
+            gtol=config.bfgs_gtol,
+            c1=config.bfgs_c1,
+            c2=config.bfgs_c2,
+            xrtol=config.bfgs_xrtol,
+        ),
     )
     trainer = ReducedQoiTrainer(
         train_manifest=opinf_result.latent_train_manifest,
@@ -616,6 +646,12 @@ def run_demo(config: DemoConfig) -> dict[str, object] | None:
             "ftol": config.lbfgs_ftol,
             "gtol": config.lbfgs_gtol,
             "maxls": config.lbfgs_maxls,
+        },
+        "bfgs": {
+            "gtol": config.bfgs_gtol,
+            "c1": config.bfgs_c1,
+            "c2": config.bfgs_c2,
+            "xrtol": config.bfgs_xrtol,
         },
         "opinf_regularization": {
             "coeff_w": config.opinf_reg_w,

@@ -125,6 +125,7 @@ from .runtime import DistributedContext
 from .train import (
     AdamUpdater,
     AdamUpdaterConfig,
+    BfgsUpdaterConfig,
     GradientDescentUpdater,
     GradientDescentUpdaterConfig,
     LbfgsUpdaterConfig,
@@ -190,6 +191,7 @@ __all__ = [
     "OpInfInitializationResult",
     "AdamUpdater",
     "AdamUpdaterConfig",
+    "BfgsUpdaterConfig",
     "GradientDescentUpdater",
     "GradientDescentUpdaterConfig",
     "LbfgsUpdaterConfig",

@@ -30,7 +30,7 @@ NTEST="${NTEST:-112}"
 MPI_RANKS="${MPI_RANKS:-${SLURM_NTASKS}}"
 LATENT_RANK_START="${LATENT_RANK_START:-8}"
 LATENT_RANK_END="${LATENT_RANK_END:-10}"
-OPTIMIZER="${OPTIMIZER:-lbfgs}"
+OPTIMIZER="${OPTIMIZER:-bfgs}"
 MAX_ITERATIONS="${MAX_ITERATIONS:-4000}"
 MAX_DT="${MAX_DT:-0.01}"
 TIME_INTEGRATOR="${TIME_INTEGRATOR:-implicit_midpoint}"
@@ -40,6 +40,10 @@ LBFGS_MAXCOR="${LBFGS_MAXCOR:-20}"
 LBFGS_FTOL="${LBFGS_FTOL:-1e-12}"
 LBFGS_GTOL="${LBFGS_GTOL:-1e-8}"
 LBFGS_MAXLS="${LBFGS_MAXLS:-30}"
+BFGS_GTOL="${BFGS_GTOL:-1e-6}"
+BFGS_C1="${BFGS_C1:-1e-4}"
+BFGS_C2="${BFGS_C2:-0.9}"
+BFGS_XRTOL="${BFGS_XRTOL:-1e-7}"
 OPINF_REG_W="${OPINF_REG_W:-1e-4}"
 OPINF_REG_H="${OPINF_REG_H:-1e-4}"
 OPINF_REG_B="${OPINF_REG_B:-1e-4}"
@@ -119,6 +123,10 @@ export LBFGS_MAXCOR
 export LBFGS_FTOL
 export LBFGS_GTOL
 export LBFGS_MAXLS
+export BFGS_GTOL
+export BFGS_C1
+export BFGS_C2
+export BFGS_XRTOL
 export OPINF_REG_W
 export OPINF_REG_H
 export OPINF_REG_B
@@ -159,6 +167,10 @@ for LATENT_RANK in $(seq "${LATENT_RANK_START}" "${LATENT_RANK_END}"); do
     --lbfgs-ftol "${LBFGS_FTOL}"
     --lbfgs-gtol "${LBFGS_GTOL}"
     --lbfgs-maxls "${LBFGS_MAXLS}"
+    --bfgs-gtol "${BFGS_GTOL}"
+    --bfgs-c1 "${BFGS_C1}"
+    --bfgs-c2 "${BFGS_C2}"
+    --bfgs-xrtol "${BFGS_XRTOL}"
     --opinf-reg-w "${OPINF_REG_W}"
     --opinf-reg-h "${OPINF_REG_H}"
     --opinf-reg-b "${OPINF_REG_B}"
