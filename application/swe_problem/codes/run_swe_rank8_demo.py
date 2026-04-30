@@ -34,7 +34,14 @@ from goattm.data import NpzSampleManifest, load_npz_sample_manifest, make_npz_tr
 from goattm.preprocess import OpInfInitializationRegularization, initialize_reduced_model_via_opinf  # noqa: E402
 from goattm.problems import DecoderTikhonovRegularization, DynamicsTikhonovRegularization  # noqa: E402
 from goattm.runtime import DistributedContext  # noqa: E402
-from goattm.train import BfgsUpdaterConfig, LbfgsUpdaterConfig, ReducedQoiTrainer, ReducedQoiTrainerConfig  # noqa: E402
+from goattm.train import (  # noqa: E402
+    AdamBfgsUpdaterConfig,
+    AdamUpdaterConfig,
+    BfgsUpdaterConfig,
+    LbfgsUpdaterConfig,
+    ReducedQoiTrainer,
+    ReducedQoiTrainerConfig,
+)
 
 
 DEFAULT_MANIFEST_PATH = SWE_PROBLEM_ROOT / "data" / "processed_data" / "manifest.npz"
@@ -53,6 +60,11 @@ class SweDemoConfig:
     optimizer: str
     max_iterations: int
     normalization_target_max_abs: float
+    adam_learning_rate: float
+    adam_beta1: float
+    adam_beta2: float
+    adam_epsilon: float
+    adam_gradient_clip_norm: float | None
     lbfgs_maxcor: int
     lbfgs_ftol: float
     lbfgs_gtol: float
@@ -61,6 +73,7 @@ class SweDemoConfig:
     bfgs_c1: float
     bfgs_c2: float
     bfgs_xrtol: float
+    adam_bfgs_adam_iterations: int
     opinf_reg_w: float
     opinf_reg_h: float
     opinf_reg_b: float
@@ -88,10 +101,15 @@ def parse_args() -> SweDemoConfig:
     parser.add_argument(
         "--optimizer",
         default="lbfgs",
-        choices=("lbfgs", "bfgs", "adam", "gradient_descent", "newton_action"),
+        choices=("lbfgs", "bfgs", "adam_bfgs", "adam", "gradient_descent", "newton_action"),
     )
     parser.add_argument("--max-iterations", type=int, default=50)
     parser.add_argument("--normalization-target-max-abs", type=float, default=0.9)
+    parser.add_argument("--adam-learning-rate", type=float, default=1e-2)
+    parser.add_argument("--adam-beta1", type=float, default=0.9)
+    parser.add_argument("--adam-beta2", type=float, default=0.999)
+    parser.add_argument("--adam-epsilon", type=float, default=1e-8)
+    parser.add_argument("--adam-gradient-clip-norm", type=float, default=None)
     parser.add_argument("--lbfgs-maxcor", type=int, default=20)
     parser.add_argument("--lbfgs-ftol", type=float, default=1e-12)
     parser.add_argument("--lbfgs-gtol", type=float, default=1e-8)
@@ -100,6 +118,7 @@ def parse_args() -> SweDemoConfig:
     parser.add_argument("--bfgs-c1", type=float, default=1e-4)
     parser.add_argument("--bfgs-c2", type=float, default=0.9)
     parser.add_argument("--bfgs-xrtol", type=float, default=1e-7)
+    parser.add_argument("--adam-bfgs-adam-iterations", type=int, default=100)
     parser.add_argument("--opinf-reg-w", type=float, default=1e-4)
     parser.add_argument("--opinf-reg-h", type=float, default=1e-4)
     parser.add_argument("--opinf-reg-b", type=float, default=1e-4)
@@ -138,6 +157,20 @@ def validate_config(config: SweDemoConfig) -> None:
         raise ValueError(f"max_iterations must be positive, got {config.max_iterations}")
     if config.normalization_target_max_abs <= 0.0:
         raise ValueError("normalization_target_max_abs must be positive.")
+    if config.adam_learning_rate <= 0.0:
+        raise ValueError(f"adam_learning_rate must be positive, got {config.adam_learning_rate}")
+    if not (0.0 < config.adam_beta1 < 1.0):
+        raise ValueError(f"adam_beta1 must satisfy 0 < beta1 < 1, got {config.adam_beta1}")
+    if not (0.0 < config.adam_beta2 < 1.0):
+        raise ValueError(f"adam_beta2 must satisfy 0 < beta2 < 1, got {config.adam_beta2}")
+    if config.adam_epsilon <= 0.0:
+        raise ValueError(f"adam_epsilon must be positive, got {config.adam_epsilon}")
+    if config.adam_gradient_clip_norm is not None and config.adam_gradient_clip_norm <= 0.0:
+        raise ValueError(f"adam_gradient_clip_norm must be positive, got {config.adam_gradient_clip_norm}")
+    if config.adam_bfgs_adam_iterations < 0:
+        raise ValueError(
+            f"adam_bfgs_adam_iterations must be nonnegative, got {config.adam_bfgs_adam_iterations}"
+        )
     if config.lbfgs_maxcor <= 0:
         raise ValueError(f"lbfgs_maxcor must be positive, got {config.lbfgs_maxcor}")
     if config.lbfgs_maxls <= 0:
@@ -277,6 +310,13 @@ def run_swe_demo(config: SweDemoConfig) -> dict[str, object] | None:
         checkpoint_every=10,
         log_every=1,
         test_every=1,
+        adam=AdamUpdaterConfig(
+            learning_rate=config.adam_learning_rate,
+            beta1=config.adam_beta1,
+            beta2=config.adam_beta2,
+            epsilon=config.adam_epsilon,
+            gradient_clip_norm=config.adam_gradient_clip_norm,
+        ),
         lbfgs=LbfgsUpdaterConfig(
             maxcor=config.lbfgs_maxcor,
             ftol=config.lbfgs_ftol,
@@ -289,6 +329,7 @@ def run_swe_demo(config: SweDemoConfig) -> dict[str, object] | None:
             c2=config.bfgs_c2,
             xrtol=config.bfgs_xrtol,
         ),
+        adam_bfgs=AdamBfgsUpdaterConfig(adam_iterations=config.adam_bfgs_adam_iterations),
     )
     trainer = ReducedQoiTrainer(
         train_manifest=opinf_result.latent_train_manifest,
@@ -340,6 +381,13 @@ def run_swe_demo(config: SweDemoConfig) -> dict[str, object] | None:
         "max_dt": config.max_dt,
         "optimizer": config.optimizer,
         "max_iterations": config.max_iterations,
+        "adam": {
+            "learning_rate": config.adam_learning_rate,
+            "beta1": config.adam_beta1,
+            "beta2": config.adam_beta2,
+            "epsilon": config.adam_epsilon,
+            "gradient_clip_norm": config.adam_gradient_clip_norm,
+        },
         "lbfgs": {
             "maxcor": config.lbfgs_maxcor,
             "ftol": config.lbfgs_ftol,
@@ -351,6 +399,9 @@ def run_swe_demo(config: SweDemoConfig) -> dict[str, object] | None:
             "c1": config.bfgs_c1,
             "c2": config.bfgs_c2,
             "xrtol": config.bfgs_xrtol,
+        },
+        "adam_bfgs": {
+            "adam_iterations": config.adam_bfgs_adam_iterations,
         },
         "normalization_target_max_abs": config.normalization_target_max_abs,
         "opinf_regression_relative_residual": float(opinf_result.regression_relative_residual),

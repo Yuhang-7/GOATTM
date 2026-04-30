@@ -23,6 +23,9 @@ INPUT_ROOT_ENV_VAR = "SWE_ORIGINAL_DATA_ROOT"
 CURRENT_ORIGINAL_DATA_ROOT = Path("/storage/yuhang/swedata/originaldata/swe_data_2026_510510")
 DEFAULT_OUTPUT_ROOT = THIS_FILE.parents[1] / "data" / "processed_data"
 DEFAULT_QOI_STRIDE = 5
+INPUT_MODE_UPLIFT_PARAMETERS = "uplift_parameters"
+INPUT_MODE_UPLIFT_TIME_DERIVATIVE = "uplift_time_derivative"
+INPUT_MODE_CHOICES = (INPUT_MODE_UPLIFT_PARAMETERS, INPUT_MODE_UPLIFT_TIME_DERIVATIVE)
 
 
 def default_input_root() -> Path:
@@ -39,6 +42,7 @@ class ConvertedSample:
     observation_count: int
     output_dimension: int
     input_dimension: int
+    input_mode: str
 
 
 def parse_args() -> argparse.Namespace:
@@ -75,6 +79,18 @@ def parse_args() -> argparse.Namespace:
             "5, 10, ..., 1500 and prepends a zero QoI at t=0."
         ),
     )
+    parser.add_argument(
+        "--input-mode",
+        choices=INPUT_MODE_CHOICES,
+        default=INPUT_MODE_UPLIFT_PARAMETERS,
+        help=(
+            "Select the latent-dynamics input p(t). "
+            f"'{INPUT_MODE_UPLIFT_PARAMETERS}' uses the original constant "
+            "Gaussian uplift parameters [xi, yi, Ti, sigma_i, Hi]. "
+            f"'{INPUT_MODE_UPLIFT_TIME_DERIVATIVE}' uses the same packet descriptors but replaces Hi "
+            "with d/dt[Hi * phi(t; Ti)] evaluated at each observation time."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -105,7 +121,63 @@ def _load_required_matrix(npz_data: np.lib.npyio.NpzFile, key: str) -> np.ndarra
     return value
 
 
-def convert_original_sample(original_path: Path, output_samples_root: Path, qoi_stride: int) -> ConvertedSample:
+def _mollifier_time_derivative(times: np.ndarray, ti: np.ndarray) -> np.ndarray:
+    times = np.asarray(times, dtype=np.float64)
+    ti = np.asarray(ti, dtype=np.float64)
+    if np.any(ti <= 0.0):
+        raise ValueError("All Ti values must be positive to evaluate the uplift time derivative.")
+    tau = times[:, None] / ti[None, :]
+    active = (tau > 0.0) & (tau < 1.0)
+    clipped_tau = np.clip(tau, 0.0, 1.0)
+    derivative = 30.0 * clipped_tau**2 * (clipped_tau - 1.0) ** 2 / ti[None, :]
+    return np.where(active, derivative, 0.0)
+
+
+def build_input_values(
+    observation_times: np.ndarray,
+    xi: np.ndarray,
+    yi: np.ndarray,
+    ti: np.ndarray,
+    sigma_i: np.ndarray,
+    hi: np.ndarray,
+    input_mode: str,
+) -> tuple[np.ndarray, tuple[str, ...]]:
+    if input_mode == INPUT_MODE_UPLIFT_PARAMETERS:
+        constant_input = np.concatenate([xi, yi, ti, sigma_i, hi], axis=0)
+        input_values = np.repeat(constant_input[None, :], observation_times.shape[0], axis=0)
+        feature_names = (
+            tuple(f"xi_{idx}" for idx in range(xi.shape[0]))
+            + tuple(f"yi_{idx}" for idx in range(yi.shape[0]))
+            + tuple(f"Ti_{idx}" for idx in range(ti.shape[0]))
+            + tuple(f"sigma_i_{idx}" for idx in range(sigma_i.shape[0]))
+            + tuple(f"Hi_{idx}" for idx in range(hi.shape[0]))
+        )
+        return input_values, feature_names
+    if input_mode == INPUT_MODE_UPLIFT_TIME_DERIVATIVE:
+        dhi_dt = hi[None, :] * _mollifier_time_derivative(observation_times, ti)
+        packet_prefix = np.repeat(
+            np.concatenate([xi, yi, ti, sigma_i], axis=0)[None, :],
+            observation_times.shape[0],
+            axis=0,
+        )
+        input_values = np.concatenate([packet_prefix, dhi_dt], axis=1)
+        feature_names = (
+            tuple(f"xi_{idx}" for idx in range(xi.shape[0]))
+            + tuple(f"yi_{idx}" for idx in range(yi.shape[0]))
+            + tuple(f"Ti_{idx}" for idx in range(ti.shape[0]))
+            + tuple(f"sigma_i_{idx}" for idx in range(sigma_i.shape[0]))
+            + tuple(f"dHi_dt_{idx}" for idx in range(hi.shape[0]))
+        )
+        return input_values, feature_names
+    raise ValueError(f"Unknown input_mode '{input_mode}'. Expected one of {INPUT_MODE_CHOICES}.")
+
+
+def convert_original_sample(
+    original_path: Path,
+    output_samples_root: Path,
+    qoi_stride: int,
+    input_mode: str,
+) -> ConvertedSample:
     if qoi_stride <= 0:
         raise ValueError(f"qoi_stride must be positive, got {qoi_stride}")
     sample_id = original_path.stem
@@ -145,8 +217,15 @@ def convert_original_sample(original_path: Path, output_samples_root: Path, qoi_
             np.asarray(selected_qoi_values, dtype=np.float64),
         ]
     )
-    constant_input = np.concatenate([xi, yi, ti, sigma_i, hi], axis=0)
-    input_values = np.repeat(constant_input[None, :], observation_times.shape[0], axis=0)
+    input_values, input_feature_names = build_input_values(
+        observation_times=observation_times,
+        xi=xi,
+        yi=yi,
+        ti=ti,
+        sigma_i=sigma_i,
+        hi=hi,
+        input_mode=input_mode,
+    )
     sample = NpzQoiSample(
         sample_id=sample_id,
         observation_times=observation_times,
@@ -156,6 +235,8 @@ def convert_original_sample(original_path: Path, output_samples_root: Path, qoi_
         input_values=input_values,
         metadata={
             "dataset_kind": "swe_sensor_qoi",
+            "input_mode": input_mode,
+            "input_feature_names": np.asarray(input_feature_names),
             "original_npz_path": str(original_path),
             "original_time_offset": 0.0,
             "qoi_stride": int(qoi_stride),
@@ -178,6 +259,7 @@ def convert_original_sample(original_path: Path, output_samples_root: Path, qoi_
         observation_count=observation_times.shape[0],
         output_dimension=qoi_observations.shape[1],
         input_dimension=input_values.shape[1],
+        input_mode=input_mode,
     )
 
 
@@ -187,6 +269,7 @@ def write_summary(
     manifest: NpzSampleManifest,
     converted_samples: list[ConvertedSample],
     qoi_stride: int,
+    input_mode: str,
 ) -> None:
     first = converted_samples[0]
     summary = {
@@ -198,6 +281,7 @@ def write_summary(
         "observation_count_per_sample": int(first.observation_count),
         "qoi_output_dimension": int(first.output_dimension),
         "input_parameter_dimension": int(first.input_dimension),
+        "input_mode": input_mode,
         "qoi_stride": int(qoi_stride),
         "prepended_zero_initial_qoi": True,
         "kept_original_qoi_time_first": first.sample.metadata["kept_original_qoi_time_first"],
@@ -229,7 +313,12 @@ def main() -> None:
     manifest_sample_paths: list[Path] = []
     manifest_sample_ids: list[str] = []
     for original_path in sample_paths:
-        converted = convert_original_sample(original_path.resolve(), output_samples_root, qoi_stride=args.qoi_stride)
+        converted = convert_original_sample(
+            original_path.resolve(),
+            output_samples_root,
+            qoi_stride=args.qoi_stride,
+            input_mode=args.input_mode,
+        )
         save_npz_qoi_sample(converted.sample_path, converted.sample)
         converted_samples.append(converted)
         manifest_sample_paths.append(Path("samples") / converted.sample_path.name)
@@ -241,7 +330,14 @@ def main() -> None:
         sample_ids=tuple(manifest_sample_ids),
     )
     save_npz_sample_manifest(output_root / "manifest.npz", manifest)
-    write_summary(output_root, input_root.resolve(), manifest, converted_samples, qoi_stride=args.qoi_stride)
+    write_summary(
+        output_root,
+        input_root.resolve(),
+        manifest,
+        converted_samples,
+        qoi_stride=args.qoi_stride,
+        input_mode=args.input_mode,
+    )
 
     print(
         f"Converted {len(converted_samples)} samples from {input_root} to {output_root}.",

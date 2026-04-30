@@ -33,6 +33,11 @@ TIME_INTEGRATOR="${TIME_INTEGRATOR:-rk4}"
 OPTIMIZER="${OPTIMIZER:-lbfgs}"
 MAX_ITERATIONS="${MAX_ITERATIONS:-50}"
 NORMALIZATION_TARGET_MAX_ABS="${NORMALIZATION_TARGET_MAX_ABS:-0.9}"
+ADAM_LEARNING_RATE="${ADAM_LEARNING_RATE:-1e-2}"
+ADAM_BETA1="${ADAM_BETA1:-0.9}"
+ADAM_BETA2="${ADAM_BETA2:-0.999}"
+ADAM_EPSILON="${ADAM_EPSILON:-1e-8}"
+ADAM_GRADIENT_CLIP_NORM="${ADAM_GRADIENT_CLIP_NORM:-}"
 LBFGS_MAXCOR="${LBFGS_MAXCOR:-20}"
 LBFGS_FTOL="${LBFGS_FTOL:-1e-12}"
 LBFGS_GTOL="${LBFGS_GTOL:-1e-8}"
@@ -41,6 +46,7 @@ BFGS_GTOL="${BFGS_GTOL:-1e-6}"
 BFGS_C1="${BFGS_C1:-1e-4}"
 BFGS_C2="${BFGS_C2:-0.9}"
 BFGS_XRTOL="${BFGS_XRTOL:-1e-7}"
+ADAM_BFGS_ADAM_ITERATIONS="${ADAM_BFGS_ADAM_ITERATIONS:-100}"
 
 activate_conda_env() {
   if [[ "${GOATTM_SKIP_CONDA_ACTIVATE}" == "1" ]]; then
@@ -83,6 +89,10 @@ PY_ARGS=(
   --optimizer "${OPTIMIZER}"
   --max-iterations "${MAX_ITERATIONS}"
   --normalization-target-max-abs "${NORMALIZATION_TARGET_MAX_ABS}"
+  --adam-learning-rate "${ADAM_LEARNING_RATE}"
+  --adam-beta1 "${ADAM_BETA1}"
+  --adam-beta2 "${ADAM_BETA2}"
+  --adam-epsilon "${ADAM_EPSILON}"
   --lbfgs-maxcor "${LBFGS_MAXCOR}"
   --lbfgs-ftol "${LBFGS_FTOL}"
   --lbfgs-gtol "${LBFGS_GTOL}"
@@ -91,7 +101,12 @@ PY_ARGS=(
   --bfgs-c1 "${BFGS_C1}"
   --bfgs-c2 "${BFGS_C2}"
   --bfgs-xrtol "${BFGS_XRTOL}"
+  --adam-bfgs-adam-iterations "${ADAM_BFGS_ADAM_ITERATIONS}"
 )
+
+if [[ -n "${ADAM_GRADIENT_CLIP_NORM}" ]]; then
+  PY_ARGS+=(--adam-gradient-clip-norm "${ADAM_GRADIENT_CLIP_NORM}")
+fi
 
 echo "Running SWE rank-8 demo from ${REPO_ROOT}"
 echo "Manifest: ${MANIFEST_PATH}"

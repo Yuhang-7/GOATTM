@@ -46,6 +46,27 @@ cd /storage/yuhang/Myresearch/GOATTM
 python application/swe_problem/codes/preprocess_swe_npz_dataset.py
 ```
 
+Choose the latent-dynamics input through `--input-mode`:
+
+```bash
+# Original behavior: constant Gaussian uplift packet parameters [xi, yi, Ti, sigma_i, Hi].
+python application/swe_problem/codes/preprocess_swe_npz_dataset.py \
+  --input-mode uplift_parameters
+
+# Alternative experiment: analytic time derivative of the uplift packet.
+python application/swe_problem/codes/preprocess_swe_npz_dataset.py \
+  --input-mode uplift_time_derivative \
+  --output-root application/swe_problem/data/processed_data_uplift_dt
+```
+
+The shell wrapper exposes the same switch as `SWE_INPUT_MODE`, for example:
+
+```bash
+SWE_INPUT_MODE=uplift_time_derivative \
+SWE_PROCESSED_DATA_ROOT=application/swe_problem/data/processed_data_uplift_dt \
+bash application/swe_problem/codes/run_preprocess_swe.sh
+```
+
 Run the 64-sample rank-8 RK4 optimization demo:
 
 ```bash

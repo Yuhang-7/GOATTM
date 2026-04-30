@@ -3,6 +3,7 @@ from .plot_qoi_predictions import plot_qoi_prediction_reports, plot_qoi_predicti
 from .optimize_reduced_qoi import ReducedQoiOptimizationRun, optimize_reduced_qoi_from_manifest
 from .reduced_qoi_trainer import (
     AdamUpdater,
+    AdamBfgsUpdaterConfig,
     AdamUpdaterConfig,
     BfgsUpdaterConfig,
     GradientDescentUpdater,
@@ -21,6 +22,7 @@ from .reduced_qoi_trainer import (
 
 __all__ = [
     "AdamUpdater",
+    "AdamBfgsUpdaterConfig",
     "AdamUpdaterConfig",
     "BfgsUpdaterConfig",
     "GradientDescentUpdater",

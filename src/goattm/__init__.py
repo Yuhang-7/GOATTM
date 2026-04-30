@@ -124,6 +124,7 @@ from .problems import (
 from .runtime import DistributedContext
 from .train import (
     AdamUpdater,
+    AdamBfgsUpdaterConfig,
     AdamUpdaterConfig,
     BfgsUpdaterConfig,
     GradientDescentUpdater,
@@ -190,6 +191,7 @@ __all__ = [
     "OpInfInitializationRegularization",
     "OpInfInitializationResult",
     "AdamUpdater",
+    "AdamBfgsUpdaterConfig",
     "AdamUpdaterConfig",
     "BfgsUpdaterConfig",
     "GradientDescentUpdater",

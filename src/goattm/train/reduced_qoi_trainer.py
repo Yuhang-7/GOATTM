@@ -70,6 +70,11 @@ class BfgsUpdaterConfig:
 
 
 @dataclass(frozen=True)
+class AdamBfgsUpdaterConfig:
+    adam_iterations: int = 100
+
+
+@dataclass(frozen=True)
 class NewtonActionUpdaterConfig:
     hessian_mode: str = "action"
     damping: float = 1e-4
@@ -98,6 +103,7 @@ class ReducedQoiTrainerConfig:
     gradient_descent: GradientDescentUpdaterConfig = field(default_factory=GradientDescentUpdaterConfig)
     lbfgs: LbfgsUpdaterConfig = field(default_factory=LbfgsUpdaterConfig)
     bfgs: BfgsUpdaterConfig = field(default_factory=BfgsUpdaterConfig)
+    adam_bfgs: AdamBfgsUpdaterConfig = field(default_factory=AdamBfgsUpdaterConfig)
     newton_action: NewtonActionUpdaterConfig = field(default_factory=NewtonActionUpdaterConfig)
 
 
@@ -479,6 +485,9 @@ class ReducedQoiTrainingLogger:
                 "c2": config.bfgs.c2,
                 "xrtol": config.bfgs.xrtol,
             },
+            "adam_bfgs": {
+                "adam_iterations": config.adam_bfgs.adam_iterations,
+            },
             "newton_action": {
                 "hessian_mode": config.newton_action.hessian_mode,
                 "damping": config.newton_action.damping,
@@ -815,13 +824,13 @@ class ReducedQoiTrainer:
             self.updater = AdamUpdater(config.adam)
         elif config.optimizer == "gradient_descent":
             self.updater = GradientDescentUpdater(config.gradient_descent)
-        elif config.optimizer in {"lbfgs", "bfgs"}:
+        elif config.optimizer in {"lbfgs", "bfgs", "adam_bfgs", "adam+bfgs"}:
             self.updater = None
         elif config.optimizer == "newton_action":
             self.updater = NewtonActionUpdater(config.newton_action)
         else:
             raise ValueError(
-                f"Unsupported optimizer '{config.optimizer}'. Supported optimizers are 'adam', 'gradient_descent', 'lbfgs', 'bfgs', and 'newton_action'."
+                f"Unsupported optimizer '{config.optimizer}'. Supported optimizers are 'adam', 'gradient_descent', 'lbfgs', 'bfgs', 'adam_bfgs', and 'newton_action'."
             )
         logger = None
         if self.context.rank == 0:
@@ -1011,33 +1020,46 @@ class ReducedQoiTrainer:
             else:
                 raise RuntimeError(f"Unknown root-led L-BFGS command: {op!r}")
 
-    def _scipy_quasi_newton_options(self) -> tuple[str, dict[str, float | int]]:
-        if self.config.optimizer == "lbfgs":
+    def _scipy_quasi_newton_options(
+        self,
+        optimizer: str | None = None,
+        max_iterations: int | None = None,
+    ) -> tuple[str, dict[str, float | int]]:
+        method_name = self.config.optimizer if optimizer is None else optimizer
+        iteration_limit = self.config.max_iterations if max_iterations is None else max_iterations
+        if method_name == "lbfgs":
             return (
                 "L-BFGS-B",
                 {
-                    "maxiter": self.config.max_iterations,
+                    "maxiter": iteration_limit,
                     "maxcor": self.config.lbfgs.maxcor,
                     "ftol": self.config.lbfgs.ftol,
                     "gtol": self.config.lbfgs.gtol,
                     "maxls": self.config.lbfgs.maxls,
                 },
             )
-        if self.config.optimizer == "bfgs":
+        if method_name == "bfgs":
             return (
                 "BFGS",
                 {
-                    "maxiter": self.config.max_iterations,
+                    "maxiter": iteration_limit,
                     "gtol": self.config.bfgs.gtol,
                     "xrtol": self.config.bfgs.xrtol,
                 },
             )
-        raise RuntimeError(f"Unsupported SciPy quasi-Newton optimizer '{self.config.optimizer}'.")
+        raise RuntimeError(f"Unsupported SciPy quasi-Newton optimizer '{method_name}'.")
 
     def _train_with_scipy_quasi_newton(
         self,
         initial_dynamics: DynamicsLike,
+        optimizer: str | None = None,
+        max_iterations: int | None = None,
+        iteration_offset: int = 0,
+        initial_best: ReducedQoiTrainingSnapshot | None = None,
+        record_initial: bool = True,
     ) -> tuple[ReducedQoiTrainingSnapshot, ReducedQoiTrainingSnapshot]:
+        scipy_optimizer = self.config.optimizer if optimizer is None else optimizer
+        iteration_limit = self.config.max_iterations if max_iterations is None else max_iterations
         optimizer_root = 0
         using_workers = self.context.size > 1
         if using_workers and self.context.rank != optimizer_root:
@@ -1083,7 +1105,7 @@ class ReducedQoiTrainer:
                     if local_exception is not None:
                         raise local_exception
                     raise RuntimeError(
-                        f"{self.config.optimizer.upper()} evaluation failed on worker rank: "
+                        f"{scipy_optimizer.upper()} evaluation failed on worker rank: "
                         + self._format_lbfgs_command_failures(failures)
                     )
             if local_exception is not None:
@@ -1124,7 +1146,7 @@ class ReducedQoiTrainer:
                     if local_exception is not None:
                         raise local_exception
                     raise RuntimeError(
-                        f"{self.config.optimizer.upper()} snapshot evaluation failed on worker rank: "
+                        f"{scipy_optimizer.upper()} snapshot evaluation failed on worker rank: "
                         + self._format_lbfgs_command_failures(failures)
                     )
             if local_exception is not None:
@@ -1149,7 +1171,7 @@ class ReducedQoiTrainer:
                     "reference_parameter_norm": float(np.linalg.norm(reference)),
                     "candidate_parameter_norm": float(np.linalg.norm(candidate)),
                     "delta_norm": float(np.linalg.norm(delta)),
-                    "optimizer": self.config.optimizer,
+                    "optimizer": scipy_optimizer,
                 }
                 if isinstance(exc, ForwardRolloutFailure):
                     extra.update(
@@ -1164,7 +1186,7 @@ class ReducedQoiTrainer:
                 if self.context.rank == 0:
                     dynamics = dynamics_from_parameter_vector(current_template, candidate)
                     artifact_paths = self.logger.save_failure_artifact(
-                        name=f"{self.config.optimizer}_eval_failure_{lbfgs_failure_count:04d}",
+                        name=f"{scipy_optimizer}_eval_failure_{lbfgs_failure_count:04d}",
                         dynamics=dynamics,
                         parameter_vector=candidate,
                         message=f"{type(exc).__name__}: {exc}",
@@ -1176,7 +1198,7 @@ class ReducedQoiTrainer:
                     artifact_text = "" if artifact_paths is None else f" Saved to {artifact_paths[0]} and {artifact_paths[1]}."
                     self.logger.log_stderr(
                         (
-                            f"{self.config.optimizer.upper()} evaluation failure #{lbfgs_failure_count}: "
+                            f"{scipy_optimizer.upper()} evaluation failure #{lbfgs_failure_count}: "
                             f"{type(exc).__name__}: {exc}. Returning penalty objective.{artifact_text}"
                         ),
                         echo=self.config.echo_progress,
@@ -1189,7 +1211,7 @@ class ReducedQoiTrainer:
             candidate = np.asarray(vector, dtype=np.float64).copy()
             step_norm = float(np.linalg.norm(candidate - previous_callback_vector))
             previous_callback_vector = candidate
-            snapshot = dispatch_snapshot(callback_iteration, candidate, step_norm)
+            snapshot = dispatch_snapshot(iteration_offset + callback_iteration, candidate, step_norm)
             if self._is_better(snapshot, best_snapshot):
                 best_snapshot = snapshot
                 is_best = True
@@ -1200,9 +1222,32 @@ class ReducedQoiTrainer:
 
         try:
             initial_snapshot = dispatch_snapshot(iteration=0, vector=x0, step_norm=0.0)
-            best_snapshot = initial_snapshot
-            self._record_snapshot(initial_snapshot, best_snapshot, is_best=True)
-            scipy_method, scipy_options = self._scipy_quasi_newton_options()
+            if iteration_offset != 0:
+                initial_snapshot = ReducedQoiTrainingSnapshot(
+                    iteration=iteration_offset,
+                    dynamics=initial_snapshot.dynamics,
+                    decoder=initial_snapshot.decoder,
+                    train_result=initial_snapshot.train_result,
+                    test_data_loss=initial_snapshot.test_data_loss,
+                    train_relative_error=initial_snapshot.train_relative_error,
+                    test_relative_error=initial_snapshot.test_relative_error,
+                    step_norm=initial_snapshot.step_norm,
+                    gradient_norm=initial_snapshot.gradient_norm,
+                    dynamic_parameter_norm=initial_snapshot.dynamic_parameter_norm,
+                    decoder_parameter_norm=initial_snapshot.decoder_parameter_norm,
+                )
+            best_snapshot = initial_snapshot if initial_best is None else initial_best
+            if record_initial:
+                if self._is_better(initial_snapshot, best_snapshot):
+                    best_snapshot = initial_snapshot
+                    is_best = True
+                else:
+                    is_best = initial_best is None
+                self._record_snapshot(initial_snapshot, best_snapshot, is_best=is_best)
+            scipy_method, scipy_options = self._scipy_quasi_newton_options(
+                optimizer=scipy_optimizer,
+                max_iterations=iteration_limit,
+            )
 
             opt_result = minimize(
                 objective_and_gradient,
@@ -1214,7 +1259,7 @@ class ReducedQoiTrainer:
             )
 
             final_vector = np.asarray(opt_result.x, dtype=np.float64).copy()
-            final_iteration = callback_iteration
+            final_iteration = iteration_offset + callback_iteration
             final_step_norm = float(np.linalg.norm(final_vector - previous_callback_vector))
             final_snapshot = dispatch_snapshot(
                 iteration=final_iteration,
@@ -1248,6 +1293,74 @@ class ReducedQoiTrainer:
                     pass
             raise
 
+    def _train_with_step_updater(
+        self,
+        initial_dynamics: DynamicsLike,
+        updater: AdamUpdater | GradientDescentUpdater | NewtonActionUpdater,
+        max_iterations: int,
+        iteration_offset: int = 0,
+        initial_best: ReducedQoiTrainingSnapshot | None = None,
+    ) -> tuple[ReducedQoiTrainingSnapshot, ReducedQoiTrainingSnapshot]:
+        current_dynamics = initial_dynamics
+        best_snapshot = initial_best
+        final_snapshot = None
+
+        for local_iteration in range(max_iterations + 1):
+            iteration = iteration_offset + local_iteration
+            train_result = self.gradient_calculator.evaluate(current_dynamics)
+            snapshot = self._evaluate_snapshot(
+                iteration=iteration,
+                dynamics=current_dynamics,
+                step_norm=0.0,
+                train_result=train_result,
+            )
+
+            step_norm = 0.0
+            next_dynamics = current_dynamics
+            if local_iteration < max_iterations:
+                gradient = np.asarray(train_result.reduced_objective_gradient, dtype=np.float64)
+                parameter_vector = dynamics_parameter_vector(current_dynamics)
+                if isinstance(updater, (AdamUpdater, GradientDescentUpdater)):
+                    next_vector, step_norm = updater.step(parameter_vector, gradient)
+                else:
+                    prepared_state = ReducedObjectivePreparedState(
+                        dynamics=current_dynamics,
+                        result=train_result,
+                    )
+                    next_vector, step_norm = updater.step(
+                        current_dynamics=current_dynamics,
+                        prepared_state=prepared_state,
+                        workflow=self.reduced_workflow,
+                    )
+                next_dynamics = dynamics_from_parameter_vector(current_dynamics, next_vector)
+                snapshot = ReducedQoiTrainingSnapshot(
+                    iteration=snapshot.iteration,
+                    dynamics=snapshot.dynamics,
+                    decoder=snapshot.decoder,
+                    train_result=snapshot.train_result,
+                    test_data_loss=snapshot.test_data_loss,
+                    train_relative_error=snapshot.train_relative_error,
+                    test_relative_error=snapshot.test_relative_error,
+                    step_norm=step_norm,
+                    gradient_norm=snapshot.gradient_norm,
+                    dynamic_parameter_norm=snapshot.dynamic_parameter_norm,
+                    decoder_parameter_norm=snapshot.decoder_parameter_norm,
+                )
+
+            if best_snapshot is None or self._is_better(snapshot, best_snapshot):
+                best_snapshot = snapshot
+                is_best = True
+            else:
+                is_best = False
+
+            self._record_snapshot(snapshot, best_snapshot, is_best=is_best)
+            final_snapshot = snapshot
+            current_dynamics = next_dynamics
+
+        if final_snapshot is None or best_snapshot is None:
+            raise RuntimeError("Training loop terminated before producing any snapshot.")
+        return final_snapshot, best_snapshot
+
     def train(self, initial_dynamics: DynamicsLike) -> ReducedQoiTrainingResult:
         function_timer = FunctionTimer()
         train_start = time.perf_counter()
@@ -1263,65 +1376,44 @@ class ReducedQoiTrainer:
                 )
                 self.logger.write_initial_parameters(initial_dynamics, self.decoder_template)
                 if self.config.optimizer in {"lbfgs", "bfgs"}:
-                    final_snapshot, best_snapshot = self._train_with_scipy_quasi_newton(initial_dynamics)
-                else:
-                    current_dynamics = initial_dynamics
-                    best_snapshot = None
-                    final_snapshot = None
-
-                    for iteration in range(self.config.max_iterations + 1):
-                        train_result = self.gradient_calculator.evaluate(current_dynamics)
-                        snapshot = self._evaluate_snapshot(
-                            iteration=iteration,
-                            dynamics=current_dynamics,
-                            step_norm=0.0,
-                            train_result=train_result,
+                    final_snapshot, best_snapshot = self._train_with_scipy_quasi_newton(
+                        initial_dynamics,
+                        optimizer=self.config.optimizer,
+                        max_iterations=self.config.max_iterations,
+                    )
+                elif self.config.optimizer in {"adam_bfgs", "adam+bfgs"}:
+                    adam_iterations = min(
+                        max(0, int(self.config.adam_bfgs.adam_iterations)),
+                        self.config.max_iterations,
+                    )
+                    self.logger.log_stdout(
+                        (
+                            f"Running Adam+BFGS schedule: adam_iterations={adam_iterations} "
+                            f"bfgs_iterations={self.config.max_iterations - adam_iterations}"
+                        ),
+                        echo=self.config.echo_progress and self.context.rank == 0,
+                    )
+                    final_snapshot, best_snapshot = self._train_with_step_updater(
+                        initial_dynamics,
+                        updater=AdamUpdater(self.config.adam),
+                        max_iterations=adam_iterations,
+                    )
+                    bfgs_iterations = self.config.max_iterations - adam_iterations
+                    if bfgs_iterations > 0:
+                        final_snapshot, best_snapshot = self._train_with_scipy_quasi_newton(
+                            final_snapshot.dynamics,
+                            optimizer="bfgs",
+                            max_iterations=bfgs_iterations,
+                            iteration_offset=final_snapshot.iteration,
+                            initial_best=best_snapshot,
+                            record_initial=False,
                         )
-
-                        step_norm = 0.0
-                        next_dynamics = current_dynamics
-                        if iteration < self.config.max_iterations:
-                            gradient = np.asarray(train_result.reduced_objective_gradient, dtype=np.float64)
-                            parameter_vector = dynamics_parameter_vector(current_dynamics)
-                            if isinstance(self.updater, (AdamUpdater, GradientDescentUpdater)):
-                                next_vector, step_norm = self.updater.step(parameter_vector, gradient)
-                            else:
-                                prepared_state = ReducedObjectivePreparedState(
-                                    dynamics=current_dynamics,
-                                    result=train_result,
-                                )
-                                next_vector, step_norm = self.updater.step(
-                                    current_dynamics=current_dynamics,
-                                    prepared_state=prepared_state,
-                                    workflow=self.reduced_workflow,
-                                )
-                            next_dynamics = dynamics_from_parameter_vector(current_dynamics, next_vector)
-                            snapshot = ReducedQoiTrainingSnapshot(
-                                iteration=snapshot.iteration,
-                                dynamics=snapshot.dynamics,
-                                decoder=snapshot.decoder,
-                                train_result=snapshot.train_result,
-                                test_data_loss=snapshot.test_data_loss,
-                                train_relative_error=snapshot.train_relative_error,
-                                test_relative_error=snapshot.test_relative_error,
-                                step_norm=step_norm,
-                                gradient_norm=snapshot.gradient_norm,
-                                dynamic_parameter_norm=snapshot.dynamic_parameter_norm,
-                                decoder_parameter_norm=snapshot.decoder_parameter_norm,
-                            )
-
-                        if best_snapshot is None or self._is_better(snapshot, best_snapshot):
-                            best_snapshot = snapshot
-                            is_best = True
-                        else:
-                            is_best = False
-
-                        self._record_snapshot(snapshot, best_snapshot, is_best=is_best)
-                        final_snapshot = snapshot
-                        current_dynamics = next_dynamics
-
-                    if final_snapshot is None or best_snapshot is None:
-                        raise RuntimeError("Training loop terminated before producing any snapshot.")
+                else:
+                    final_snapshot, best_snapshot = self._train_with_step_updater(
+                        initial_dynamics,
+                        updater=self.updater,
+                        max_iterations=self.config.max_iterations,
+                    )
                 self.logger.log_stdout(
                     (
                         f"Completed GOATTM training run final_iter={final_snapshot.iteration} "

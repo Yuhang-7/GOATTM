@@ -44,7 +44,14 @@ from goattm.data import (  # noqa: E402
 from goattm.preprocess import OpInfInitializationRegularization, initialize_reduced_model_via_opinf  # noqa: E402
 from goattm.problems import DecoderTikhonovRegularization, DynamicsTikhonovRegularization  # noqa: E402
 from goattm.runtime import DistributedContext  # noqa: E402
-from goattm.train import BfgsUpdaterConfig, LbfgsUpdaterConfig, ReducedQoiTrainer, ReducedQoiTrainerConfig  # noqa: E402
+from goattm.train import (  # noqa: E402
+    AdamBfgsUpdaterConfig,
+    AdamUpdaterConfig,
+    BfgsUpdaterConfig,
+    LbfgsUpdaterConfig,
+    ReducedQoiTrainer,
+    ReducedQoiTrainerConfig,
+)
 
 
 DEFAULT_OUTPUT_DIR = ROOT / "demo" / "outputs" / "reduced_qoi_optimization_demo"
@@ -68,6 +75,11 @@ class DemoConfig:
     # Optimization setting.
     optimizer: str
     max_iterations: int
+    adam_learning_rate: float
+    adam_beta1: float
+    adam_beta2: float
+    adam_epsilon: float
+    adam_gradient_clip_norm: float | None
     lbfgs_maxcor: int
     lbfgs_ftol: float
     lbfgs_gtol: float
@@ -76,6 +88,7 @@ class DemoConfig:
     bfgs_c1: float
     bfgs_c2: float
     bfgs_xrtol: float
+    adam_bfgs_adam_iterations: int
 
     # Regularization setting.
     opinf_reg_w: float
@@ -130,9 +143,14 @@ def parse_args() -> DemoConfig:
     parser.add_argument(
         "--optimizer",
         default="bfgs",
-        choices=("lbfgs", "bfgs", "adam", "gradient_descent", "newton_action"),
+        choices=("lbfgs", "bfgs", "adam_bfgs", "adam", "gradient_descent", "newton_action"),
     )
     parser.add_argument("--max-iterations", type=int, default=50, help="Optimizer max iterations.")
+    parser.add_argument("--adam-learning-rate", type=float, default=1e-2, help="Adam learning rate.")
+    parser.add_argument("--adam-beta1", type=float, default=0.9, help="Adam beta1.")
+    parser.add_argument("--adam-beta2", type=float, default=0.999, help="Adam beta2.")
+    parser.add_argument("--adam-epsilon", type=float, default=1e-8, help="Adam epsilon.")
+    parser.add_argument("--adam-gradient-clip-norm", type=float, default=None, help="Optional Adam gradient clip norm.")
     parser.add_argument("--lbfgs-maxcor", type=int, default=20, help="L-BFGS memory size.")
     parser.add_argument("--lbfgs-ftol", type=float, default=1e-12, help="L-BFGS ftol.")
     parser.add_argument("--lbfgs-gtol", type=float, default=1e-8, help="L-BFGS gtol.")
@@ -141,6 +159,12 @@ def parse_args() -> DemoConfig:
     parser.add_argument("--bfgs-c1", type=float, default=1e-4, help="BFGS Armijo line-search parameter.")
     parser.add_argument("--bfgs-c2", type=float, default=0.9, help="BFGS curvature line-search parameter.")
     parser.add_argument("--bfgs-xrtol", type=float, default=1e-7, help="BFGS relative step-size tolerance.")
+    parser.add_argument(
+        "--adam-bfgs-adam-iterations",
+        type=int,
+        default=100,
+        help="Number of Adam warm-up iterations before switching to BFGS.",
+    )
     parser.add_argument("--opinf-reg-w", type=float, default=1e-4, help="OpInf W regularization.")
     parser.add_argument("--opinf-reg-h", type=float, default=1e-4, help="OpInf H regularization.")
     parser.add_argument("--opinf-reg-b", type=float, default=1e-4, help="OpInf B regularization.")
@@ -167,6 +191,11 @@ def parse_args() -> DemoConfig:
         time_integrator=args.time_integrator,
         optimizer=args.optimizer,
         max_iterations=args.max_iterations,
+        adam_learning_rate=args.adam_learning_rate,
+        adam_beta1=args.adam_beta1,
+        adam_beta2=args.adam_beta2,
+        adam_epsilon=args.adam_epsilon,
+        adam_gradient_clip_norm=args.adam_gradient_clip_norm,
         lbfgs_maxcor=args.lbfgs_maxcor,
         lbfgs_ftol=args.lbfgs_ftol,
         lbfgs_gtol=args.lbfgs_gtol,
@@ -175,6 +204,7 @@ def parse_args() -> DemoConfig:
         bfgs_c1=args.bfgs_c1,
         bfgs_c2=args.bfgs_c2,
         bfgs_xrtol=args.bfgs_xrtol,
+        adam_bfgs_adam_iterations=args.adam_bfgs_adam_iterations,
         opinf_reg_w=args.opinf_reg_w,
         opinf_reg_h=args.opinf_reg_h,
         opinf_reg_b=args.opinf_reg_b,
@@ -207,6 +237,20 @@ def validate_config(config: DemoConfig) -> None:
         )
     if config.max_iterations <= 0:
         raise ValueError(f"max_iterations must be positive, got {config.max_iterations}")
+    if config.adam_learning_rate <= 0.0:
+        raise ValueError(f"adam_learning_rate must be positive, got {config.adam_learning_rate}")
+    if not (0.0 < config.adam_beta1 < 1.0):
+        raise ValueError(f"adam_beta1 must satisfy 0 < beta1 < 1, got {config.adam_beta1}")
+    if not (0.0 < config.adam_beta2 < 1.0):
+        raise ValueError(f"adam_beta2 must satisfy 0 < beta2 < 1, got {config.adam_beta2}")
+    if config.adam_epsilon <= 0.0:
+        raise ValueError(f"adam_epsilon must be positive, got {config.adam_epsilon}")
+    if config.adam_gradient_clip_norm is not None and config.adam_gradient_clip_norm <= 0.0:
+        raise ValueError(f"adam_gradient_clip_norm must be positive, got {config.adam_gradient_clip_norm}")
+    if config.adam_bfgs_adam_iterations < 0:
+        raise ValueError(
+            f"adam_bfgs_adam_iterations must be nonnegative, got {config.adam_bfgs_adam_iterations}"
+        )
     if config.max_dt <= 0.0:
         raise ValueError(f"max_dt must be positive, got {config.max_dt}")
     if config.normalization_target_max_abs <= 0.0:
@@ -578,6 +622,13 @@ def run_demo(config: DemoConfig) -> dict[str, object] | None:
         checkpoint_every=10,
         log_every=1,
         test_every=1,
+        adam=AdamUpdaterConfig(
+            learning_rate=config.adam_learning_rate,
+            beta1=config.adam_beta1,
+            beta2=config.adam_beta2,
+            epsilon=config.adam_epsilon,
+            gradient_clip_norm=config.adam_gradient_clip_norm,
+        ),
         lbfgs=LbfgsUpdaterConfig(
             maxcor=config.lbfgs_maxcor,
             ftol=config.lbfgs_ftol,
@@ -590,6 +641,7 @@ def run_demo(config: DemoConfig) -> dict[str, object] | None:
             c2=config.bfgs_c2,
             xrtol=config.bfgs_xrtol,
         ),
+        adam_bfgs=AdamBfgsUpdaterConfig(adam_iterations=config.adam_bfgs_adam_iterations),
     )
     trainer = ReducedQoiTrainer(
         train_manifest=opinf_result.latent_train_manifest,
@@ -641,6 +693,13 @@ def run_demo(config: DemoConfig) -> dict[str, object] | None:
         "latent_rank": config.latent_rank,
         "optimizer": config.optimizer,
         "max_iterations": trainer_config.max_iterations,
+        "adam": {
+            "learning_rate": config.adam_learning_rate,
+            "beta1": config.adam_beta1,
+            "beta2": config.adam_beta2,
+            "epsilon": config.adam_epsilon,
+            "gradient_clip_norm": config.adam_gradient_clip_norm,
+        },
         "lbfgs": {
             "maxcor": config.lbfgs_maxcor,
             "ftol": config.lbfgs_ftol,
@@ -652,6 +711,9 @@ def run_demo(config: DemoConfig) -> dict[str, object] | None:
             "c1": config.bfgs_c1,
             "c2": config.bfgs_c2,
             "xrtol": config.bfgs_xrtol,
+        },
+        "adam_bfgs": {
+            "adam_iterations": config.adam_bfgs_adam_iterations,
         },
         "opinf_regularization": {
             "coeff_w": config.opinf_reg_w,
