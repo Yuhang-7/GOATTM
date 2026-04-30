@@ -9,6 +9,7 @@ import numpy as np
 
 from ..core.parametrization import (
     compressed_quadratic_dimension,
+    njit,
     mu_h_dimension,
     s_params_to_matrix,
     skew_symmetric_dimension,
@@ -30,6 +31,9 @@ from ..runtime.distributed import DistributedContext
 from ..solvers.time_integration import TimeIntegrator, rollout_to_observation_times, validate_time_integrator
 from .constrained_least_squares import build_energy_preserving_compressed_h_basis
 from .normalization import DatasetNormalizationStats, NormalizedDatasetArtifacts, materialize_normalized_train_test_split
+
+
+_DYNAMICS_ASSEMBLY_CHUNK_SIZE = 64
 
 
 @dataclass(frozen=True)
@@ -591,11 +595,19 @@ def _assemble_dynamics_fit_system(
         latent_trajectory = _reconstruct_latent_trajectory_from_sample(sample, rank=rank)
         u_mid, du, p_mid = _midpoint_regression_arrays(sample, latent_trajectory)
         adjusted_target = du - u_mid @ fixed_a_matrix.T
-        phi = _dynamics_feature_actions(u=u_mid, p=p_mid, w_basis=w_basis, h_basis_tensor=h_basis_tensor)
-        phi_2d = phi.reshape((-1, feature_dim))
-        target_vector = adjusted_target.reshape(-1)
-        local_normal += phi_2d.T @ phi_2d
-        local_rhs += phi_2d.T @ target_vector
+        for start in range(0, u_mid.shape[0], _DYNAMICS_ASSEMBLY_CHUNK_SIZE):
+            stop = min(start + _DYNAMICS_ASSEMBLY_CHUNK_SIZE, u_mid.shape[0])
+            p_chunk = None if p_mid is None else p_mid[start:stop]
+            phi = _dynamics_feature_actions(
+                u=u_mid[start:stop],
+                p=p_chunk,
+                w_basis=w_basis,
+                h_basis_tensor=h_basis_tensor,
+            )
+            phi_2d = phi.reshape((-1, feature_dim))
+            target_vector = adjusted_target[start:stop].reshape(-1)
+            local_normal += phi_2d.T @ phi_2d
+            local_rhs += phi_2d.T @ target_vector
         local_target_sumsq += float(np.sum(du * du))
         local_step_count += int(u_mid.shape[0])
     return local_normal, local_rhs, local_target_sumsq, local_step_count
@@ -762,23 +774,67 @@ def _dynamics_feature_actions(
     total_dim = nw + nh + rank * input_dim + rank
     phi = np.zeros((sample_count, rank, total_dim), dtype=np.float64)
 
-    if nw:
-        phi[:, :, :nw] = np.einsum("abn,mb->man", w_basis, u, optimize=True)
-
-    zeta = _quadratic_features_matrix(u)
-    if nh:
-        phi[:, :, nw : nw + nh] = np.einsum("asn,ms->man", h_basis_tensor, zeta, optimize=True)
-
-    offset = nw + nh
-    if p is not None:
-        identity = np.eye(rank, dtype=np.float64)
-        for input_index in range(input_dim):
-            phi[:, :, offset + input_index * rank : offset + (input_index + 1) * rank] = (
-                p[:, input_index, None, None] * identity[None, :, :]
-            )
-        offset += rank * input_dim
-    phi[:, :, offset:] = np.eye(rank, dtype=np.float64)[None, :, :]
+    p_array = np.empty((sample_count, 0), dtype=np.float64) if p is None else np.asarray(p, dtype=np.float64)
+    _fill_dynamics_feature_actions_numba(
+        np.asarray(u, dtype=np.float64),
+        p_array,
+        np.asarray(w_basis, dtype=np.float64),
+        np.asarray(h_basis_tensor, dtype=np.float64),
+        phi,
+    )
     return phi
+
+
+@njit(cache=True)
+def _fill_dynamics_feature_actions_numba(
+    u: np.ndarray,
+    p: np.ndarray,
+    w_basis: np.ndarray,
+    h_basis_tensor: np.ndarray,
+    phi: np.ndarray,
+) -> None:
+    sample_count = u.shape[0]
+    rank = u.shape[1]
+    nw = w_basis.shape[2]
+    nh = h_basis_tensor.shape[2]
+    input_dim = p.shape[1]
+    zeta_dim = (rank * (rank + 1)) // 2
+    zeta = np.empty(zeta_dim, dtype=np.float64)
+
+    for sample_index in range(sample_count):
+        zeta_index = 0
+        for i in range(rank):
+            for j in range(i + 1):
+                zeta[zeta_index] = u[sample_index, i] * u[sample_index, j]
+                zeta_index += 1
+
+        for row in range(rank):
+            for feature_index in range(nw):
+                value = 0.0
+                for col in range(rank):
+                    value += w_basis[row, col, feature_index] * u[sample_index, col]
+                phi[sample_index, row, feature_index] = value
+
+            for feature_index in range(nh):
+                value = 0.0
+                for zeta_index in range(zeta_dim):
+                    value += h_basis_tensor[row, zeta_index, feature_index] * zeta[zeta_index]
+                phi[sample_index, row, nw + feature_index] = value
+
+            offset = nw + nh
+            for input_index in range(input_dim):
+                for identity_col in range(rank):
+                    value = 0.0
+                    if identity_col == row:
+                        value = p[sample_index, input_index]
+                    phi[sample_index, row, offset + input_index * rank + identity_col] = value
+            offset += rank * input_dim
+
+            for identity_col in range(rank):
+                value = 0.0
+                if identity_col == row:
+                    value = 1.0
+                phi[sample_index, row, offset + identity_col] = value
 
 
 def _compressed_h_basis_tensor(h_basis: np.ndarray, rank: int) -> np.ndarray:
