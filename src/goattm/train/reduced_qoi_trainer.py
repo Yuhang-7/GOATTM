@@ -15,6 +15,7 @@ import numpy as np
 from scipy.optimize import minimize
 
 from goattm.data import NpzSampleManifest
+from goattm.models.linear_dynamics import LinearDynamics
 from goattm.models.quadratic_decoder import QuadraticDecoder
 from goattm.models.quadratic_dynamics import QuadraticDynamics
 from goattm.models.stabilized_quadratic_dynamics import StabilizedQuadraticDynamics
@@ -35,7 +36,15 @@ from goattm.runtime import DistributedContext, FunctionTimer, timed, use_functio
 from goattm.solvers import TimeIntegrator, validate_time_integrator
 
 
-DynamicsLike = QuadraticDynamics | StabilizedQuadraticDynamics
+DynamicsLike = LinearDynamics | QuadraticDynamics | StabilizedQuadraticDynamics
+
+
+def _dynamics_type_name(dynamics: DynamicsLike) -> str:
+    if isinstance(dynamics, StabilizedQuadraticDynamics):
+        return "stabilized"
+    if isinstance(dynamics, LinearDynamics):
+        return "linear"
+    return "general"
 
 
 @dataclass(frozen=True)
@@ -545,7 +554,7 @@ class ReducedQoiTrainingLogger:
         payload = {
             "message": message,
             "parameter_norm": float(np.linalg.norm(parameter_vector)),
-            "dynamics_type": "stabilized" if isinstance(dynamics, StabilizedQuadraticDynamics) else "general",
+            "dynamics_type": _dynamics_type_name(dynamics),
             "dynamics_key": dynamics_parameter_key(dynamics),
         }
         if extra is not None:
@@ -577,10 +586,11 @@ class ReducedQoiTrainingLogger:
         if not self.active:
             return
         payload: dict[str, Any] = {
-            "dynamics_type": np.array("stabilized" if isinstance(dynamics, StabilizedQuadraticDynamics) else "general"),
+            "dynamics_type": np.array(_dynamics_type_name(dynamics)),
             "decoder_template_v1": decoder_template.v1,
             "decoder_template_v2": decoder_template.v2,
             "decoder_template_v0": decoder_template.v0,
+            "decoder_template_form": np.array(decoder_template.form),
         }
         if isinstance(dynamics, StabilizedQuadraticDynamics):
             payload["s_params"] = dynamics.s_params
@@ -1501,11 +1511,12 @@ def write_training_checkpoint(
         "best_iteration": np.array(best_snapshot.iteration, dtype=np.int64),
         "best_train_objective": np.array(best_snapshot.objective_value, dtype=np.float64),
         "best_train_relative_error": np.array(best_snapshot.train_relative_error, dtype=np.float64),
-        "dynamics_type": np.array("stabilized" if isinstance(dynamics, StabilizedQuadraticDynamics) else "general"),
+        "dynamics_type": np.array(_dynamics_type_name(dynamics)),
         "dynamics_key": np.array(dynamics_parameter_key(dynamics)),
         "decoder_v1": decoder.v1,
         "decoder_v2": decoder.v2,
         "decoder_v0": decoder.v0,
+        "decoder_form": np.array(decoder.form),
     }
     if snapshot.test_data_loss is not None:
         payload["test_data_loss"] = np.array(snapshot.test_data_loss, dtype=np.float64)

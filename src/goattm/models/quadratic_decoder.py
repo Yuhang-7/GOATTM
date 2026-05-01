@@ -13,8 +13,11 @@ class QuadraticDecoder:
     v1: np.ndarray
     v2: np.ndarray
     v0: np.ndarray
+    form: str = "V1V2v"
 
     def __post_init__(self) -> None:
+        if self.form not in {"V1v", "V1V2v"}:
+            raise ValueError(f"form must be 'V1v' or 'V1V2v', got {self.form!r}")
         if self.v1.ndim != 2:
             raise ValueError(f"v1 must be rank-2, got shape {self.v1.shape}")
         dq, r = self.v1.shape
@@ -39,8 +42,12 @@ class QuadraticDecoder:
 
     def decode(self, u: np.ndarray) -> np.ndarray:
         self.validate_state(u)
+        if self.form == "V1v":
+            return self.v1 @ u + self.v0
         return self.v1 @ u + self.v2 @ quadratic_features(u) + self.v0
 
     def jacobian(self, u: np.ndarray) -> np.ndarray:
         self.validate_state(u)
+        if self.form == "V1v":
+            return self.v1
         return self.v1 + quadratic_jacobian_matrix(self.v2, u)

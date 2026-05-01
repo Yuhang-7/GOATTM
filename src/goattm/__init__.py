@@ -17,6 +17,7 @@ from .core import (
     upper_triangular_dimension,
     w_params_to_matrix,
 )
+from .models.linear_dynamics import LinearDynamics
 from .models.quadratic_dynamics import QuadraticDynamics
 from .models.quadratic_decoder import QuadraticDecoder
 from .models.stabilized_quadratic_dynamics import StabilizedQuadraticDynamics
@@ -161,6 +162,7 @@ from .solvers.implicit_midpoint import (
 
 __all__ = [
     "QuadraticDecoder",
+    "LinearDynamics",
     "QuadraticDynamics",
     "StabilizedQuadraticDynamics",
     "a_from_stabilized_params",

@@ -68,6 +68,8 @@ class DemoConfig:
 
     # Model and solver setting.
     latent_rank: int
+    dynamic_form: str
+    decoder_form: str
     max_dt: float
     time_integrator: str
     normalization_target_max_abs: float
@@ -127,6 +129,8 @@ def parse_args() -> DemoConfig:
     parser.add_argument("--output-dimension", type=int, default=20, help="Synthetic QoI dimension.")
     parser.add_argument("--seed", type=int, default=20260428, help="Synthetic dataset RNG seed.")
     parser.add_argument("--latent-rank", type=int, default=4, help="Reduced latent dimension.")
+    parser.add_argument("--dynamic-form", choices=("ABc", "AHBc"), default="AHBc", help="Reduced dynamics form.")
+    parser.add_argument("--decoder-form", choices=("V1v", "V1V2v"), default="V1V2v", help="QoI decoder form.")
     parser.add_argument("--max-dt", type=float, default=0.01, help="Maximum rollout time step.")
     parser.add_argument(
         "--normalization-target-max-abs",
@@ -186,6 +190,8 @@ def parse_args() -> DemoConfig:
         output_dimension=args.output_dimension,
         seed=args.seed,
         latent_rank=args.latent_rank,
+        dynamic_form=args.dynamic_form,
+        decoder_form=args.decoder_form,
         max_dt=args.max_dt,
         normalization_target_max_abs=args.normalization_target_max_abs,
         time_integrator=args.time_integrator,
@@ -611,12 +617,14 @@ def run_demo(config: DemoConfig) -> dict[str, object] | None:
             coeff_v2=config.decoder_reg_v2,
             coeff_v0=config.decoder_reg_v0,
         ),
+        dynamic_form=config.dynamic_form,
+        decoder_form=config.decoder_form,
     )
 
     trainer_config = ReducedQoiTrainerConfig(
         output_dir=config.output_dir / "runs",
         time_integrator=config.time_integrator,
-        run_name_prefix=f"goattm_demo_{config.optimizer}_r{config.latent_rank}_ntrain{config.ntrain}_ntest{config.ntest}",
+        run_name_prefix=f"goattm_demo_{config.optimizer}_{config.dynamic_form}_{config.decoder_form}_r{config.latent_rank}_ntrain{config.ntrain}_ntest{config.ntest}",
         optimizer=config.optimizer,
         max_iterations=config.max_iterations,
         checkpoint_every=10,

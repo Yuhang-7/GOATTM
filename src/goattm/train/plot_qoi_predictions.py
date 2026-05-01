@@ -20,6 +20,7 @@ import numpy as np
 from matplotlib.backends.backend_pdf import PdfPages
 
 from goattm.data import NpzQoiSample, NpzSampleManifest, load_npz_qoi_sample, load_npz_sample_manifest
+from goattm.models.linear_dynamics import LinearDynamics
 from goattm.models.quadratic_decoder import QuadraticDecoder
 from goattm.models.quadratic_dynamics import QuadraticDynamics
 from goattm.models.stabilized_quadratic_dynamics import StabilizedQuadraticDynamics
@@ -27,7 +28,7 @@ from goattm.preprocess.normalization import DatasetNormalizationStats
 from goattm.solvers import rollout_to_observation_times, validate_time_integrator
 
 
-DynamicsLike = QuadraticDynamics | StabilizedQuadraticDynamics
+DynamicsLike = LinearDynamics | QuadraticDynamics | StabilizedQuadraticDynamics
 
 
 @dataclass(frozen=True)
@@ -243,10 +244,12 @@ def _optional_float_array(data: np.lib.npyio.NpzFile, key: str) -> np.ndarray | 
 
 def load_checkpoint_models(path: Path) -> tuple[QuadraticDecoder, DynamicsLike]:
     with np.load(path, allow_pickle=True) as data:
+        decoder_form = str(data["decoder_form"].item()) if "decoder_form" in data.files else "V1V2v"
         decoder = QuadraticDecoder(
             v1=np.asarray(data["decoder_v1"], dtype=np.float64),
             v2=np.asarray(data["decoder_v2"], dtype=np.float64),
             v0=np.asarray(data["decoder_v0"], dtype=np.float64),
+            form=decoder_form,
         )
         dynamics_type = str(data["dynamics_type"].item())
         mu_h = np.asarray(data["mu_h"], dtype=np.float64)
@@ -257,6 +260,12 @@ def load_checkpoint_models(path: Path) -> tuple[QuadraticDecoder, DynamicsLike]:
                 s_params=np.asarray(data["s_params"], dtype=np.float64),
                 w_params=np.asarray(data["w_params"], dtype=np.float64),
                 mu_h=mu_h,
+                c=c,
+                b=b,
+            )
+        elif dynamics_type == "linear":
+            dynamics = LinearDynamics(
+                a=np.asarray(data["a_matrix"], dtype=np.float64),
                 c=c,
                 b=b,
             )

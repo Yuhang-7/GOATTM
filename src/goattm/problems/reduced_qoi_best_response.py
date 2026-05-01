@@ -18,6 +18,7 @@ from goattm.core.quadratic import quadratic_jacobian_matrix
 from goattm.data.npz_dataset import NpzQoiSample, NpzSampleManifest, load_npz_qoi_sample, load_npz_sample_manifest
 from goattm.losses import rollout_qoi_loss_and_gradients_from_cached_observation_rollout
 from goattm.losses.qoi_loss import qoi_trajectory_loss, trapezoidal_rule_weights_from_times
+from goattm.models.linear_dynamics import LinearDynamics
 from goattm.models.quadratic_decoder import QuadraticDecoder
 from goattm.models.quadratic_dynamics import QuadraticDynamics
 from goattm.models.stabilized_quadratic_dynamics import StabilizedQuadraticDynamics
@@ -45,7 +46,7 @@ from goattm.solvers import (
 )
 
 
-DynamicsLike = QuadraticDynamics | StabilizedQuadraticDynamics
+DynamicsLike = LinearDynamics | QuadraticDynamics | StabilizedQuadraticDynamics
 
 
 @dataclass(frozen=True)
@@ -441,17 +442,18 @@ class ObservationAlignedBestResponseEvaluator:
         forward_cache = self.get_forward_rollouts(dynamics)
         if regularization is None:
             regularization = DecoderTikhonovRegularization()
-        cache_key = (forward_cache.dynamics_key, regularization_key(regularization))
+        cache_key = (forward_cache.dynamics_key, decoder_template.form, regularization_key(regularization))
         if self._best_response_cache is not None and self._best_response_cache_key == cache_key:
             return self._best_response_cache
 
-        feature_dim = decoder_feature_dimension(decoder_template.latent_dimension)
+        feature_dim = decoder_feature_dimension(decoder_template.latent_dimension, decoder_template.form)
         local_normal_matrix = np.zeros((feature_dim, feature_dim), dtype=np.float64)
         local_rhs = np.zeros((feature_dim, decoder_template.output_dimension), dtype=np.float64)
         for rollout_entry in forward_cache.local_rollouts:
             sample_normal, sample_rhs = _assemble_decoder_normal_terms_from_cached_rollout(
                 rollout_entry=rollout_entry,
                 decoder_output_dimension=decoder_template.output_dimension,
+                decoder_form=decoder_template.form,
             )
             local_normal_matrix += sample_normal
             local_rhs += sample_rhs
@@ -459,11 +461,12 @@ class ObservationAlignedBestResponseEvaluator:
         system = DecoderNormalEquationSystem(
             latent_dimension=decoder_template.latent_dimension,
             output_dimension=decoder_template.output_dimension,
+            decoder_form=decoder_template.form,
             local_normal_matrix=local_normal_matrix,
             global_normal_matrix=self.context.allreduce_array_sum(local_normal_matrix),
             local_rhs=local_rhs,
             global_rhs=self.context.allreduce_array_sum(local_rhs),
-            regularization_diagonal=regularization.diagonal(decoder_template.latent_dimension),
+            regularization_diagonal=regularization.diagonal(decoder_template.latent_dimension, decoder_template.form),
             local_sample_count=forward_cache.local_sample_count,
             global_sample_count=forward_cache.global_sample_count,
             local_observation_count=sum(item.observation_times.shape[0] for item in forward_cache.local_rollouts),
@@ -670,7 +673,7 @@ class ObservationAlignedBestResponseEvaluator:
     ) -> np.ndarray:
         forward_cache = self.get_forward_rollouts(dynamics)
         x_matrix = decoder_parameter_matrix(decoder)
-        feature_dim = decoder_feature_dimension(dynamics.dimension)
+        feature_dim = decoder_feature_dimension(dynamics.dimension, decoder.form)
         local_action = np.zeros((feature_dim, decoder.output_dimension), dtype=np.float64)
 
         for rollout_entry in forward_cache.local_rollouts:
@@ -694,8 +697,10 @@ class ObservationAlignedBestResponseEvaluator:
                 rollout_entry.sample.qoi_observations,
                 rollout_entry.observation_weights,
             ):
-                phi = decoder_feature_vector(state)
+                phi = decoder_feature_vector(state, decoder.form)
                 dphi = decoder_feature_directional_derivative(state, state_tangent)
+                if decoder.form == "V1v":
+                    dphi = np.concatenate([state_tangent, np.zeros(1, dtype=np.float64)])
                 q_pred = x_matrix.T @ phi
                 local_action += weight * (
                     np.outer(dphi, q_pred)
@@ -744,7 +749,7 @@ class ObservationAlignedBestResponseEvaluator:
             dynamics_regularization = DynamicsTikhonovRegularization()
         dynamics_reg_gradient = dynamics_regularization_gradient_vector(dynamics, dynamics_regularization)
         dynamics_reg_loss = dynamics_regularization_loss(dynamics, dynamics_regularization)
-        decoder_data_gradient = stack_decoder_gradient_matrix(dataset_result.decoder_gradients)
+        decoder_data_gradient = stack_decoder_gradient_matrix(dataset_result.decoder_gradients, best_response.decoder.form)
 
         reduced_gradient = direct_dynamics_gradient.copy()
         chain_gradient = np.zeros_like(reduced_gradient)
@@ -799,7 +804,7 @@ class ObservationAlignedBestResponseEvaluator:
             dynamics_regularization = DynamicsTikhonovRegularization()
         dynamics_reg_gradient = dynamics_regularization_gradient_vector(dynamics, dynamics_regularization)
         dynamics_reg_loss = dynamics_regularization_loss(dynamics, dynamics_regularization)
-        decoder_data_gradient = stack_decoder_gradient_matrix(dataset_result.decoder_gradients)
+        decoder_data_gradient = stack_decoder_gradient_matrix(dataset_result.decoder_gradients, best_response.decoder.form)
 
         # GOAM-style reduced optimization uses the outer objective
         # J(mu_g) = J_data(mu_f^*(mu_g), mu_g) + R_f(mu_f^*(mu_g)),
@@ -1179,8 +1184,9 @@ def build_reduced_objective_workflow(
 def _assemble_decoder_normal_terms_from_cached_rollout(
     rollout_entry: CachedObservationRollout,
     decoder_output_dimension: int,
+    decoder_form: str = "V1V2v",
 ) -> tuple[np.ndarray, np.ndarray]:
-    feature_dim = decoder_feature_dimension(rollout_entry.observed_states.shape[1])
+    feature_dim = decoder_feature_dimension(rollout_entry.observed_states.shape[1], decoder_form)
     sample_normal = np.zeros((feature_dim, feature_dim), dtype=np.float64)
     sample_rhs = np.zeros((feature_dim, decoder_output_dimension), dtype=np.float64)
     for state, target, weight in zip(
@@ -1188,7 +1194,7 @@ def _assemble_decoder_normal_terms_from_cached_rollout(
         rollout_entry.sample.qoi_observations,
         rollout_entry.observation_weights,
     ):
-        phi = decoder_feature_vector(state)
+        phi = decoder_feature_vector(state, decoder_form)
         sample_normal += weight * np.outer(phi, phi)
         sample_rhs += weight * np.outer(phi, target)
     return sample_normal, sample_rhs
@@ -1227,9 +1233,14 @@ def matrix_to_decoder(latent_dimension: int, output_dimension: int, x_matrix: np
     if x_matrix.shape != expected_shape:
         raise ValueError(f"x_matrix must have shape {expected_shape}, got {x_matrix.shape}")
     v1 = x_matrix[:latent_dimension].T.copy()
-    v2 = x_matrix[latent_dimension : latent_dimension + quad_dim].T.copy()
+    if quad_dim == 0:
+        v2 = np.zeros((output_dimension, quadratic_features(np.zeros(latent_dimension, dtype=np.float64)).shape[0]))
+        decoder_form = "V1v"
+    else:
+        v2 = x_matrix[latent_dimension : latent_dimension + quad_dim].T.copy()
+        decoder_form = "V1V2v"
     v0 = x_matrix[-1].copy()
-    return QuadraticDecoder(v1=v1, v2=v2, v0=v0)
+    return QuadraticDecoder(v1=v1, v2=v2, v0=v0, form=decoder_form)
 
 
 def dynamics_parameter_dimension(dynamics: DynamicsLike) -> int:
@@ -1240,9 +1251,12 @@ def dynamics_parameter_vector(dynamics: DynamicsLike) -> np.ndarray:
     blocks = []
     if isinstance(dynamics, StabilizedQuadraticDynamics):
         blocks.extend([dynamics.s_params, dynamics.w_params])
+        blocks.append(dynamics.mu_h)
+    elif isinstance(dynamics, LinearDynamics):
+        blocks.append(dynamics.a.reshape(-1))
     else:
         blocks.append(dynamics.a.reshape(-1))
-    blocks.append(dynamics.mu_h)
+        blocks.append(dynamics.mu_h)
     if dynamics.b is not None:
         blocks.append(dynamics.b.reshape(-1))
     blocks.append(dynamics.c)
@@ -1250,7 +1264,12 @@ def dynamics_parameter_vector(dynamics: DynamicsLike) -> np.ndarray:
 
 
 def dynamics_parameter_key(dynamics: DynamicsLike) -> str:
-    tag = "stabilized" if isinstance(dynamics, StabilizedQuadraticDynamics) else "general"
+    if isinstance(dynamics, StabilizedQuadraticDynamics):
+        tag = "stabilized"
+    elif isinstance(dynamics, LinearDynamics):
+        tag = "linear"
+    else:
+        tag = "general"
     return _hashed_key(tag, dynamics_parameter_vector(dynamics))
 
 
@@ -1263,6 +1282,14 @@ def dynamics_from_parameter_vector(dynamics: DynamicsLike, vector: np.ndarray) -
             s_params=direction.s_params,
             w_params=direction.w_params,
             mu_h=direction.mu_h,
+            b=direction.b,
+            c=direction.c,
+        )
+    if isinstance(dynamics, LinearDynamics):
+        if direction.a is None:
+            raise ValueError("Linear dynamics vector unpacking did not provide a matrix.")
+        return LinearDynamics(
+            a=direction.a,
             b=direction.b,
             c=direction.c,
         )
@@ -1310,8 +1337,11 @@ def unpack_dynamics_parameter_vector(dynamics: DynamicsLike, vector: np.ndarray)
         offset += a_size
         s_params = None
         w_params = None
-    mu_h = flat[offset : offset + dynamics.mu_h.size].reshape(dynamics.mu_h.shape)
-    offset += dynamics.mu_h.size
+    if isinstance(dynamics, LinearDynamics):
+        mu_h = dynamics.mu_h.copy()
+    else:
+        mu_h = flat[offset : offset + dynamics.mu_h.size].reshape(dynamics.mu_h.shape)
+        offset += dynamics.mu_h.size
     if dynamics.b is not None:
         b = flat[offset : offset + dynamics.b.size].reshape(dynamics.b.shape)
         offset += dynamics.b.size
@@ -1325,9 +1355,12 @@ def pack_dynamics_gradient_vector(dynamics: DynamicsLike, gradients: dict[str, n
     blocks = []
     if isinstance(dynamics, StabilizedQuadraticDynamics):
         blocks.extend([gradients["s_params"], gradients["w_params"]])
+        blocks.append(gradients["mu_h"])
+    elif isinstance(dynamics, LinearDynamics):
+        blocks.append(gradients["a"])
     else:
         blocks.append(gradients["a"])
-    blocks.append(gradients["mu_h"])
+        blocks.append(gradients["mu_h"])
     if "b" in gradients:
         blocks.append(gradients["b"])
     elif dynamics.b is not None:
@@ -1548,10 +1581,9 @@ def _pack_dynamic_hessian_action_vector(
     delta_b_grad: np.ndarray | None,
     delta_c_grad: np.ndarray,
 ) -> np.ndarray:
-    gradients: dict[str, np.ndarray] = {
-        "mu_h": compressed_h_gradient_to_mu_h(delta_h_grad.astype(np.float64), dynamics.dimension),
-        "c": delta_c_grad,
-    }
+    gradients: dict[str, np.ndarray] = {"c": delta_c_grad}
+    if not isinstance(dynamics, LinearDynamics):
+        gradients["mu_h"] = compressed_h_gradient_to_mu_h(delta_h_grad.astype(np.float64), dynamics.dimension)
     if isinstance(dynamics, StabilizedQuadraticDynamics):
         if direction.s_params is None:
             raise ValueError("direction must provide s_params for stabilized dynamics.")
@@ -1589,7 +1621,8 @@ def dynamics_regularization_loss(
         loss += regularization.coeff_w * float(np.sum(dynamics.w_params**2))
     else:
         loss += regularization.coeff_a * float(np.sum(dynamics.a**2))
-    loss += regularization.coeff_mu_h * float(np.sum(dynamics.mu_h**2))
+    if not isinstance(dynamics, LinearDynamics):
+        loss += regularization.coeff_mu_h * float(np.sum(dynamics.mu_h**2))
     if dynamics.b is not None:
         loss += regularization.coeff_b * float(np.sum(dynamics.b**2))
     loss += regularization.coeff_c * float(np.sum(dynamics.c**2))
@@ -1600,10 +1633,9 @@ def dynamics_regularization_gradient_vector(
     dynamics: DynamicsLike,
     regularization: DynamicsTikhonovRegularization,
 ) -> np.ndarray:
-    gradients: dict[str, np.ndarray] = {
-        "mu_h": 2.0 * regularization.coeff_mu_h * np.asarray(dynamics.mu_h, dtype=np.float64),
-        "c": 2.0 * regularization.coeff_c * np.asarray(dynamics.c, dtype=np.float64),
-    }
+    gradients: dict[str, np.ndarray] = {"c": 2.0 * regularization.coeff_c * np.asarray(dynamics.c, dtype=np.float64)}
+    if not isinstance(dynamics, LinearDynamics):
+        gradients["mu_h"] = 2.0 * regularization.coeff_mu_h * np.asarray(dynamics.mu_h, dtype=np.float64)
     if isinstance(dynamics, StabilizedQuadraticDynamics):
         gradients["s_params"] = 2.0 * regularization.coeff_s * np.asarray(dynamics.s_params, dtype=np.float64)
         gradients["w_params"] = 2.0 * regularization.coeff_w * np.asarray(dynamics.w_params, dtype=np.float64)
@@ -1630,7 +1662,8 @@ def dynamics_regularization_hessian_action(
         if direction.a is None:
             raise ValueError("direction must provide a for general dynamics.")
         blocks.append(2.0 * regularization.coeff_a * np.asarray(direction.a, dtype=np.float64).reshape(-1))
-    blocks.append(2.0 * regularization.coeff_mu_h * np.asarray(direction.mu_h, dtype=np.float64).reshape(-1))
+    if not isinstance(dynamics, LinearDynamics):
+        blocks.append(2.0 * regularization.coeff_mu_h * np.asarray(direction.mu_h, dtype=np.float64).reshape(-1))
     if dynamics.b is not None:
         if direction.b is None:
             raise ValueError("direction must provide b when dynamics has input matrix b.")
@@ -1645,12 +1678,19 @@ def decoder_regularization_loss(
 ) -> float:
     return float(
         regularization.coeff_v1 * np.sum(decoder.v1**2)
-        + regularization.coeff_v2 * np.sum(decoder.v2**2)
+        + (0.0 if decoder.form == "V1v" else regularization.coeff_v2 * np.sum(decoder.v2**2))
         + regularization.coeff_v0 * np.sum(decoder.v0**2)
     )
 
 
-def stack_decoder_gradient_matrix(decoder_gradients: dict[str, np.ndarray]) -> np.ndarray:
+def stack_decoder_gradient_matrix(decoder_gradients: dict[str, np.ndarray], decoder_form: str = "V1V2v") -> np.ndarray:
+    if decoder_form == "V1v":
+        return np.vstack(
+            [
+                decoder_gradients["v1"].T.astype(np.float64, copy=False),
+                decoder_gradients["v0"].reshape(1, -1).astype(np.float64, copy=False),
+            ]
+        )
     return np.vstack(
         [
             decoder_gradients["v1"].T.astype(np.float64, copy=False),
@@ -1669,10 +1709,9 @@ def _zero_decoder_gradients(decoder: QuadraticDecoder) -> dict[str, np.ndarray]:
 
 
 def _zero_dynamics_gradients(dynamics: DynamicsLike) -> dict[str, np.ndarray]:
-    gradients: dict[str, np.ndarray] = {
-        "mu_h": np.zeros_like(dynamics.mu_h, dtype=np.float64),
-        "c": np.zeros_like(dynamics.c, dtype=np.float64),
-    }
+    gradients: dict[str, np.ndarray] = {"c": np.zeros_like(dynamics.c, dtype=np.float64)}
+    if not isinstance(dynamics, LinearDynamics):
+        gradients["mu_h"] = np.zeros_like(dynamics.mu_h, dtype=np.float64)
     if isinstance(dynamics, StabilizedQuadraticDynamics):
         gradients["s_params"] = np.zeros_like(dynamics.s_params, dtype=np.float64)
         gradients["w_params"] = np.zeros_like(dynamics.w_params, dtype=np.float64)

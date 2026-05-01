@@ -5,16 +5,16 @@ MPI-aware decoder normal equations.
 
 For observation states u_n and QoI targets q_n, define the decoder feature vector
 
-    phi(u_n) = [u_n, quad(u_n), 1].
+    phi(u_n) = [u_n, quad(u_n), 1]  or  [u_n, 1].
 
 With trapezoidal weights w_n, the decoder block solves the matrix least-squares problem
 
     min_X  0.5 * sum_n w_n ||X^T phi(u_n) - q_n||_2^2
            + c_V1 ||V1||_F^2 + c_V2 ||V2||_F^2 + c_v ||v0||_2^2,
 
-where X stacks the decoder coefficients as columns:
+where X stacks the selected decoder coefficients as columns:
 
-    X = [V1^T; V2^T; v0^T].
+    X = [V1^T; V2^T; v0^T]  or  [V1^T; v0^T].
 
 The first-order condition is the block normal equation
 
@@ -37,6 +37,7 @@ import numpy as np
 from goattm.core.parametrization import compressed_quadratic_dimension, quadratic_features
 from goattm.data.npz_dataset import NpzQoiSample, NpzSampleManifest, load_npz_qoi_sample, load_npz_sample_manifest
 from goattm.losses.qoi_loss import trapezoidal_rule_weights_from_times
+from goattm.models.linear_dynamics import LinearDynamics
 from goattm.models.quadratic_decoder import QuadraticDecoder
 from goattm.models.quadratic_dynamics import QuadraticDynamics
 from goattm.models.stabilized_quadratic_dynamics import StabilizedQuadraticDynamics
@@ -45,7 +46,7 @@ from goattm.runtime.distributed import DistributedContext
 from goattm.solvers.implicit_midpoint import rollout_implicit_midpoint_to_observation_times
 
 
-DynamicsLike = QuadraticDynamics | StabilizedQuadraticDynamics
+DynamicsLike = LinearDynamics | QuadraticDynamics | StabilizedQuadraticDynamics
 
 
 @dataclass(frozen=True)
@@ -58,8 +59,10 @@ class DecoderTikhonovRegularization:
         if self.coeff_v1 < 0.0 or self.coeff_v2 < 0.0 or self.coeff_v0 < 0.0:
             raise ValueError("Decoder Tikhonov coefficients must be nonnegative.")
 
-    def diagonal(self, latent_dimension: int) -> np.ndarray:
-        quad_dim = compressed_quadratic_dimension(latent_dimension)
+    def diagonal(self, latent_dimension: int, decoder_form: str = "V1V2v") -> np.ndarray:
+        if decoder_form not in {"V1v", "V1V2v"}:
+            raise ValueError(f"decoder_form must be 'V1v' or 'V1V2v', got {decoder_form!r}")
+        quad_dim = 0 if decoder_form == "V1v" else compressed_quadratic_dimension(latent_dimension)
         diagonal = np.empty(latent_dimension + quad_dim + 1, dtype=np.float64)
         diagonal[:latent_dimension] = 2.0 * self.coeff_v1
         diagonal[latent_dimension : latent_dimension + quad_dim] = 2.0 * self.coeff_v2
@@ -71,6 +74,7 @@ class DecoderTikhonovRegularization:
 class DecoderNormalEquationSystem:
     latent_dimension: int
     output_dimension: int
+    decoder_form: str
     local_normal_matrix: np.ndarray
     global_normal_matrix: np.ndarray
     local_rhs: np.ndarray
@@ -98,11 +102,22 @@ class DecoderNormalEquationSolveResult:
     solution_matrix: np.ndarray
 
 
-def decoder_feature_dimension(latent_dimension: int) -> int:
-    return latent_dimension + compressed_quadratic_dimension(latent_dimension) + 1
+def decoder_feature_dimension(latent_dimension: int, decoder_form: str = "V1V2v") -> int:
+    if decoder_form == "V1v":
+        return latent_dimension + 1
+    if decoder_form == "V1V2v":
+        return latent_dimension + compressed_quadratic_dimension(latent_dimension) + 1
+    raise ValueError(f"decoder_form must be 'V1v' or 'V1V2v', got {decoder_form!r}")
 
 
 def decoder_parameter_matrix(decoder: QuadraticDecoder) -> np.ndarray:
+    if decoder.form == "V1v":
+        return np.vstack(
+            [
+                decoder.v1.T.astype(np.float64, copy=False),
+                decoder.v0.reshape(1, -1).astype(np.float64, copy=False),
+            ]
+        )
     return np.vstack(
         [
             decoder.v1.T.astype(np.float64, copy=False),
@@ -131,7 +146,7 @@ def assemble_decoder_normal_equation_from_npz_dataset(
     if isinstance(manifest, (str, Path)):
         manifest = load_npz_sample_manifest(manifest)
 
-    feature_dim = decoder_feature_dimension(decoder_template.latent_dimension)
+    feature_dim = decoder_feature_dimension(decoder_template.latent_dimension, decoder_template.form)
     local_normal_matrix = np.zeros((feature_dim, feature_dim), dtype=np.float64)
     local_rhs = np.zeros((feature_dim, decoder_template.output_dimension), dtype=np.float64)
     local_sample_ids: list[str] = []
@@ -157,11 +172,12 @@ def assemble_decoder_normal_equation_from_npz_dataset(
     return DecoderNormalEquationSystem(
         latent_dimension=decoder_template.latent_dimension,
         output_dimension=decoder_template.output_dimension,
+        decoder_form=decoder_template.form,
         local_normal_matrix=local_normal_matrix,
         global_normal_matrix=context.allreduce_array_sum(local_normal_matrix),
         local_rhs=local_rhs,
         global_rhs=context.allreduce_array_sum(local_rhs),
-        regularization_diagonal=regularization.diagonal(decoder_template.latent_dimension),
+        regularization_diagonal=regularization.diagonal(decoder_template.latent_dimension, decoder_template.form),
         local_sample_count=len(local_sample_ids),
         global_sample_count=context.allreduce_int_sum(len(local_sample_ids)),
         local_observation_count=local_observation_count,
@@ -188,6 +204,7 @@ def solve_decoder_normal_equation(
     decoder = _decoder_from_solution_matrix(
         latent_dimension=system.latent_dimension,
         output_dimension=system.output_dimension,
+        decoder_form=system.decoder_form,
         solution_matrix=solution_matrix,
     )
     return DecoderNormalEquationSolveResult(
@@ -267,21 +284,28 @@ def _assemble_sample_decoder_normal_equation(
     )
     observed_states = rollout.states[observation_indices]
     weights = trapezoidal_rule_weights_from_times(sample.observation_times)
-    feature_dim = decoder_feature_dimension(dynamics.dimension)
+    feature_dim = decoder_feature_dimension(dynamics.dimension, decoder_template.form)
     sample_normal = np.zeros((feature_dim, feature_dim), dtype=np.float64)
     sample_rhs = np.zeros((feature_dim, decoder_template.output_dimension), dtype=np.float64)
 
     for state, target, weight in zip(observed_states, sample.qoi_observations, weights):
-        feature_vector = decoder_feature_vector(state)
+        feature_vector = decoder_feature_vector(state, decoder_template.form)
         sample_normal += weight * np.outer(feature_vector, feature_vector)
         sample_rhs += weight * np.outer(feature_vector, target)
 
     return sample_normal, sample_rhs, observed_states.shape[0]
 
 
-def decoder_feature_vector(state: np.ndarray) -> np.ndarray:
+def decoder_feature_vector(state: np.ndarray, decoder_form: str = "V1V2v") -> np.ndarray:
     if state.ndim != 1:
         raise ValueError(f"state must be rank-1, got shape {state.shape}")
+    if decoder_form == "V1v":
+        feature = np.empty(state.shape[0] + 1, dtype=np.float64)
+        feature[: state.shape[0]] = state
+        feature[-1] = 1.0
+        return feature
+    if decoder_form != "V1V2v":
+        raise ValueError(f"decoder_form must be 'V1v' or 'V1V2v', got {decoder_form!r}")
     quad = quadratic_features(state)
     feature = np.empty(state.shape[0] + quad.shape[0] + 1, dtype=np.float64)
     feature[: state.shape[0]] = state
@@ -293,14 +317,18 @@ def decoder_feature_vector(state: np.ndarray) -> np.ndarray:
 def _decoder_from_solution_matrix(
     latent_dimension: int,
     output_dimension: int,
+    decoder_form: str,
     solution_matrix: np.ndarray,
 ) -> QuadraticDecoder:
-    quad_dim = compressed_quadratic_dimension(latent_dimension)
+    quad_dim = 0 if decoder_form == "V1v" else compressed_quadratic_dimension(latent_dimension)
     expected_shape = (latent_dimension + quad_dim + 1, output_dimension)
     if solution_matrix.shape != expected_shape:
         raise ValueError(f"solution_matrix must have shape {expected_shape}, got {solution_matrix.shape}")
 
     v1 = solution_matrix[:latent_dimension].T.copy()
-    v2 = solution_matrix[latent_dimension : latent_dimension + quad_dim].T.copy()
+    if decoder_form == "V1v":
+        v2 = np.zeros((output_dimension, compressed_quadratic_dimension(latent_dimension)), dtype=np.float64)
+    else:
+        v2 = solution_matrix[latent_dimension : latent_dimension + quad_dim].T.copy()
     v0 = solution_matrix[-1].copy()
-    return QuadraticDecoder(v1=v1, v2=v2, v0=v0)
+    return QuadraticDecoder(v1=v1, v2=v2, v0=v0, form=decoder_form)
