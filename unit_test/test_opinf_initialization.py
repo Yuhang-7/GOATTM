@@ -15,6 +15,7 @@ if str(SRC) not in sys.path:
 
 from goattm.core.parametrization import s_params_to_matrix  # noqa: E402
 from goattm.data.npz_dataset import NpzQoiSample, NpzSampleManifest, load_npz_qoi_sample, save_npz_qoi_sample  # noqa: E402
+from goattm.models.quadratic_dynamics import QuadraticDynamics  # noqa: E402
 from goattm.preprocess.opinf_initialization import (  # noqa: E402
     OpInfLatentEmbeddingConfig,
     _assemble_dynamics_fit_system,
@@ -153,6 +154,59 @@ class OpInfInitializationTest(unittest.TestCase):
             self.assertTrue(result.validation_success)
             np.testing.assert_allclose(result.decoder_basis[:, :dq], np.eye(dq), atol=1e-12)
             self.assertTrue(np.any(np.abs(result.decoder_basis[:, dq:]) > 0.0))
+
+    def test_oldgoam_mode_initializes_general_quadratic_dynamics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            raw_root = root / "raw"
+            raw_root.mkdir(parents=True, exist_ok=True)
+
+            rank = 2
+            dq = 2
+            observation_times = np.linspace(0.0, 1.0, 31, dtype=float)
+            basis = np.eye(dq, rank, dtype=float)
+
+            train_paths = []
+            train_ids = []
+            initial_conditions = (
+                np.array([1.0, 0.0]),
+                np.array([0.0, 1.0]),
+                np.array([0.75, -0.35]),
+                np.array([-0.45, 0.8]),
+            )
+            for idx, latent_u0 in enumerate(initial_conditions):
+                latent = np.vstack([_damped_rotation_solution(0.4, t, latent_u0) for t in observation_times])
+                qoi = latent @ basis.T
+                sample = NpzQoiSample(
+                    sample_id=f"oldgoam-{idx}",
+                    observation_times=observation_times,
+                    u0=qoi[0].copy(),
+                    qoi_observations=qoi,
+                )
+                path = raw_root / f"oldgoam_{idx}.npz"
+                save_npz_qoi_sample(path, sample)
+                train_paths.append(path)
+                train_ids.append(sample.sample_id)
+
+            manifest = NpzSampleManifest(root_dir=raw_root, sample_paths=tuple(train_paths), sample_ids=tuple(train_ids))
+            result = initialize_reduced_model_via_opinf(
+                train_manifest=manifest,
+                output_dir=root / "opinf_oldgoam",
+                rank=rank,
+                apply_normalization=False,
+                time_rescale_to_unit_interval=True,
+                max_dt=0.05,
+                dynamic_form="AHBc",
+                oldgoam_mode=True,
+            )
+
+            self.assertIsInstance(result.dynamics, QuadraticDynamics)
+            self.assertTrue(result.oldgoam_mode)
+            self.assertTrue(result.as_preprocess_record()["oldgoam_mode"])
+            self.assertTrue(result.validation_success)
+            self.assertLess(result.regression_relative_residual, 1.0e-1)
+            summary = json.loads(result.summary_path.read_text(encoding="utf-8"))
+            self.assertTrue(summary["oldgoam_mode"])
 
     def test_dynamics_fit_assembly_matches_full_design_matrix_reference(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -26,6 +26,7 @@ from ..data.npz_dataset import (
 )
 from ..models.linear_dynamics import LinearDynamics
 from ..models.quadratic_decoder import QuadraticDecoder
+from ..models.quadratic_dynamics import QuadraticDynamics
 from ..models.stabilized_quadratic_dynamics import StabilizedQuadraticDynamics
 from ..problems.decoder_normal_equation import DecoderTikhonovRegularization
 from ..runtime.distributed import DistributedContext
@@ -69,8 +70,9 @@ class OpInfInitializationResult:
     latent_train_manifest_path: Path
     latent_test_manifest_path: Path | None
     decoder_basis: np.ndarray
-    dynamics: LinearDynamics | StabilizedQuadraticDynamics
+    dynamics: LinearDynamics | QuadraticDynamics | StabilizedQuadraticDynamics
     decoder: QuadraticDecoder
+    oldgoam_mode: bool
     time_scale: float
     time_rescaled_to_unit_interval: bool
     regression_relative_residual: float
@@ -91,6 +93,7 @@ class OpInfInitializationResult:
             else str(self.normalized_artifacts.test_manifest_path),
             "latent_train_manifest_path": str(self.latent_train_manifest_path),
             "latent_test_manifest_path": None if self.latent_test_manifest_path is None else str(self.latent_test_manifest_path),
+            "oldgoam_mode": bool(self.oldgoam_mode),
             "time_scale": float(self.time_scale),
             "time_rescaled_to_unit_interval": bool(self.time_rescaled_to_unit_interval),
             "normalization_scale_mode": self.normalized_artifacts.stats.scale_mode,
@@ -121,6 +124,7 @@ def initialize_reduced_model_via_opinf(
     regularization_growth: float = 10.0,
     dynamic_form: str = "AHBc",
     decoder_form: str = "V1V2v",
+    oldgoam_mode: bool = False,
 ) -> OpInfInitializationResult:
     context = DistributedContext.from_comm() if context is None else context
     regularization = OpInfInitializationRegularization() if regularization is None else regularization
@@ -242,6 +246,15 @@ def initialize_reduced_model_via_opinf(
                 debug_log_path=debug_log_path,
                 attempt=attempt,
             )
+        elif oldgoam_mode:
+            dynamics, regression_relative_residual = _fit_general_quadratic_dynamics_from_latent_dataset(
+                manifest=latent_train_manifest,
+                rank=rank,
+                regularization=current_regularization,
+                context=context,
+                debug_log_path=debug_log_path,
+                attempt=attempt,
+            )
         else:
             dynamics, regression_relative_residual = _fit_stabilized_dynamics_from_latent_dataset(
                 manifest=latent_train_manifest,
@@ -320,6 +333,7 @@ def initialize_reduced_model_via_opinf(
             "decoder_initialization": "pod_projection_only",
             "dynamic_form": dynamic_form,
             "decoder_form": decoder_form,
+            "oldgoam_mode": bool(oldgoam_mode),
             "dynamics_regression": "midpoint finite difference: du=(u[n+1]-u[n])/dt, rhs at (u[n]+u[n+1])/2",
             "default_s_params": "identity",
             "regression_relative_residual": float(regression_relative_residual),
@@ -347,6 +361,7 @@ def initialize_reduced_model_via_opinf(
         decoder_basis=basis,
         dynamics=dynamics,
         decoder=decoder,
+        oldgoam_mode=bool(oldgoam_mode),
         time_scale=float(time_scale),
         time_rescaled_to_unit_interval=bool(time_rescale_to_unit_interval),
         regression_relative_residual=float(regression_relative_residual),
@@ -593,6 +608,67 @@ def _fit_stabilized_dynamics_from_latent_dataset(
     return dynamics, float(relative_residual)
 
 
+def _fit_general_quadratic_dynamics_from_latent_dataset(
+    manifest: NpzSampleManifest,
+    rank: int,
+    regularization: OpInfInitializationRegularization,
+    context: DistributedContext,
+    debug_log_path: Path | None = None,
+    attempt: int = 0,
+) -> tuple[QuadraticDynamics, float]:
+    fit_start = time.perf_counter()
+    _write_opinf_debug(context, debug_log_path, "oldgoam_fit_start", attempt=attempt, rank=rank)
+    a_basis = _build_full_matrix_basis(rank)
+    h_basis_tensor = _compressed_h_basis_tensor(build_energy_preserving_compressed_h_basis(rank), rank)
+    fixed_a_matrix = np.zeros((rank, rank), dtype=np.float64)
+    local_normal, local_rhs, local_target_sumsq, local_step_count = _assemble_dynamics_fit_system(
+        manifest=manifest,
+        rank=rank,
+        w_basis=a_basis,
+        h_basis_tensor=h_basis_tensor,
+        context=context,
+        fixed_a_matrix=fixed_a_matrix,
+    )
+    global_step_count = context.allreduce_int_sum(local_step_count)
+    global_normal = context.allreduce_array_sum(local_normal)
+    global_rhs = context.allreduce_array_sum(local_rhs)
+    global_target_sumsq = context.allreduce_scalar_sum(local_target_sumsq)
+
+    input_dim = _infer_input_dimension(manifest)
+    nh = mu_h_dimension(rank)
+    feature_dim = rank * rank + nh + rank * input_dim + rank
+    diagonal = np.zeros(feature_dim, dtype=np.float64)
+    diagonal[: rank * rank] = regularization.coeff_w
+    diagonal[rank * rank : rank * rank + nh] = regularization.coeff_h
+    offset = rank * rank + nh
+    diagonal[offset : offset + rank * input_dim] = regularization.coeff_b
+    diagonal[offset + rank * input_dim :] = regularization.coeff_c
+    theta = np.linalg.solve(global_normal + np.diag(diagonal), global_rhs)
+
+    a = theta[: rank * rank].reshape((rank, rank)).copy()
+    mu_h = theta[rank * rank : rank * rank + nh].copy()
+    offset = rank * rank + nh
+    if input_dim > 0:
+        b = theta[offset : offset + rank * input_dim].reshape((rank, input_dim), order="F").copy()
+    else:
+        b = None
+    c = theta[offset + rank * input_dim :].copy()
+    dynamics = QuadraticDynamics(a=a, mu_h=mu_h, b=b, c=c)
+    residual_sumsq = _compute_dynamics_fit_residual_sumsq(manifest, dynamics, context=context)
+    relative_residual = 0.0 if global_target_sumsq <= 0.0 else np.sqrt(residual_sumsq / global_target_sumsq)
+    _write_opinf_debug(
+        context,
+        debug_log_path,
+        "oldgoam_fit_done",
+        attempt=attempt,
+        elapsed_seconds=time.perf_counter() - fit_start,
+        regression_step_count=global_step_count,
+        feature_dimension=feature_dim,
+        relative_residual=float(relative_residual),
+    )
+    return dynamics, float(relative_residual)
+
+
 def _fit_linear_dynamics_from_latent_dataset(
     manifest: NpzSampleManifest,
     rank: int,
@@ -720,7 +796,7 @@ def _assemble_dynamics_fit_system(
 
 def _compute_dynamics_fit_residual_sumsq(
     manifest: NpzSampleManifest,
-    dynamics: LinearDynamics | StabilizedQuadraticDynamics,
+    dynamics: LinearDynamics | QuadraticDynamics | StabilizedQuadraticDynamics,
     context: DistributedContext,
 ) -> float:
     local_residual_sumsq = 0.0
@@ -736,7 +812,7 @@ def _compute_dynamics_fit_residual_sumsq(
 
 def _validate_opinf_forward_rollouts(
     manifests: tuple[tuple[str, NpzSampleManifest], ...],
-    dynamics: LinearDynamics | StabilizedQuadraticDynamics,
+    dynamics: LinearDynamics | QuadraticDynamics | StabilizedQuadraticDynamics,
     context: DistributedContext,
     max_dt: float,
     time_integrator: TimeIntegrator,
@@ -951,7 +1027,7 @@ def _compressed_h_basis_tensor(h_basis: np.ndarray, rank: int) -> np.ndarray:
 
 
 def _evaluate_dynamics_rhs_batch(
-    dynamics: LinearDynamics | StabilizedQuadraticDynamics,
+    dynamics: LinearDynamics | QuadraticDynamics | StabilizedQuadraticDynamics,
     u: np.ndarray,
     p: np.ndarray | None,
 ) -> np.ndarray:
@@ -1003,6 +1079,14 @@ def _build_skew_symmetric_basis(rank: int) -> np.ndarray:
         params = np.zeros(dim, dtype=np.float64)
         params[idx] = 1.0
         basis[:, :, idx] = w_params_to_matrix(params, rank)
+    return basis
+
+
+def _build_full_matrix_basis(rank: int) -> np.ndarray:
+    basis = np.zeros((rank, rank, rank * rank), dtype=np.float64)
+    for row in range(rank):
+        for col in range(rank):
+            basis[row, col, row * rank + col] = 1.0
     return basis
 
 

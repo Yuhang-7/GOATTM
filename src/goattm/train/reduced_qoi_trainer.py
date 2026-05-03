@@ -152,9 +152,13 @@ class ReducedQoiTrainingResult:
 
 
 def _dynamics_component_norms(dynamics: DynamicsLike) -> dict[str, float]:
+    sym_a = 0.5 * (np.asarray(dynamics.a, dtype=np.float64) + np.asarray(dynamics.a, dtype=np.float64).T)
+    linear_eigenvalues = np.linalg.eigvals(np.asarray(dynamics.a, dtype=np.float64))
     b_norm = 0.0 if dynamics.b is None else float(np.linalg.norm(dynamics.b))
     norms = {
         "a_fro_norm": float(np.linalg.norm(dynamics.a)),
+        "a_symmetric_part_max_eigenvalue": float(np.linalg.eigvalsh(sym_a)[-1]),
+        "a_max_real_eigenvalue": float(np.max(np.real(linear_eigenvalues))),
         "h_fro_norm": float(np.linalg.norm(dynamics.h_matrix)),
         "b_fro_norm": b_norm,
         "c_l2_norm": float(np.linalg.norm(dynamics.c)),
@@ -518,6 +522,8 @@ class ReducedQoiTrainingLogger:
                 "coeff_mu_h": dynamics_regularization.coeff_mu_h,
                 "coeff_b": dynamics_regularization.coeff_b,
                 "coeff_c": dynamics_regularization.coeff_c,
+                "coeff_spectral_abscissa": dynamics_regularization.coeff_spectral_abscissa,
+                "spectral_abscissa_alpha": dynamics_regularization.spectral_abscissa_alpha,
             },
             "solver": {
                 "max_dt": max_dt,
@@ -635,6 +641,8 @@ class ReducedQoiTrainingLogger:
         record.update(
             {
                 "dynamics_a_fro_norm": component_norms["a_fro_norm"],
+                "dynamics_a_symmetric_part_max_eigenvalue": component_norms["a_symmetric_part_max_eigenvalue"],
+                "dynamics_a_max_real_eigenvalue": component_norms["a_max_real_eigenvalue"],
                 "dynamics_h_fro_norm": component_norms["h_fro_norm"],
                 "dynamics_b_fro_norm": component_norms["b_fro_norm"],
                 "dynamics_c_l2_norm": component_norms["c_l2_norm"],
@@ -707,6 +715,8 @@ class ReducedQoiTrainingLogger:
             f"grad={snapshot.gradient_norm:.6e} "
             f"step={snapshot.step_norm:.6e} "
             f"|A|={component_norms['a_fro_norm']:.3e} "
+            f"lam_max_symA={component_norms['a_symmetric_part_max_eigenvalue']:.3e} "
+            f"max_Re_lamA={component_norms['a_max_real_eigenvalue']:.3e} "
             f"|H|={component_norms['h_fro_norm']:.3e} "
             f"|B|={component_norms['b_fro_norm']:.3e} "
             f"|c|={component_norms['c_l2_norm']:.3e} "
@@ -734,6 +744,8 @@ class ReducedQoiTrainingLogger:
             f"latest_train_decoder_regularization_loss={snapshot.train_result.decoder_regularization_loss:.16e}",
             f"latest_train_dynamics_regularization_loss={snapshot.train_result.dynamics_regularization_loss:.16e}",
             f"latest_dynamics_a_fro_norm={component_norms['a_fro_norm']:.16e}",
+            f"latest_dynamics_a_symmetric_part_max_eigenvalue={component_norms['a_symmetric_part_max_eigenvalue']:.16e}",
+            f"latest_dynamics_a_max_real_eigenvalue={component_norms['a_max_real_eigenvalue']:.16e}",
             f"latest_dynamics_h_fro_norm={component_norms['h_fro_norm']:.16e}",
             f"latest_dynamics_b_fro_norm={component_norms['b_fro_norm']:.16e}",
             f"latest_dynamics_c_l2_norm={component_norms['c_l2_norm']:.16e}",
@@ -1498,6 +1510,7 @@ def write_training_checkpoint(
     path.parent.mkdir(parents=True, exist_ok=True)
     decoder = snapshot.decoder
     dynamics = snapshot.dynamics
+    component_norms = _dynamics_component_norms(dynamics)
     payload: dict[str, Any] = {
         "iteration": np.array(snapshot.iteration, dtype=np.int64),
         "train_data_loss": np.array(snapshot.train_result.data_loss, dtype=np.float64),
@@ -1513,6 +1526,14 @@ def write_training_checkpoint(
         "best_train_relative_error": np.array(best_snapshot.train_relative_error, dtype=np.float64),
         "dynamics_type": np.array(_dynamics_type_name(dynamics)),
         "dynamics_key": np.array(dynamics_parameter_key(dynamics)),
+        "dynamics_a_symmetric_part_max_eigenvalue": np.array(
+            component_norms["a_symmetric_part_max_eigenvalue"],
+            dtype=np.float64,
+        ),
+        "dynamics_a_max_real_eigenvalue": np.array(
+            component_norms["a_max_real_eigenvalue"],
+            dtype=np.float64,
+        ),
         "decoder_v1": decoder.v1,
         "decoder_v2": decoder.v2,
         "decoder_v0": decoder.v0,

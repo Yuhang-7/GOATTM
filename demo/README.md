@@ -55,6 +55,7 @@ Useful Python options:
 
 - Model and solver setting:
 - `--latent-rank 4`
+- `--oldgoam` to use direct-A oldGOAM-style dynamics instead of stabilized `A=-SS^T+W`
 - `--max-dt 0.01`
 - `--time-integrator implicit_midpoint`
 - `--normalization-target-max-abs 0.9`
@@ -75,11 +76,14 @@ Useful Python options:
 - `--decoder-reg-v1 1e-7`
 - `--decoder-reg-v2 1e-7`
 - `--decoder-reg-v0 1e-7`
+- `--dynamics-reg-a 1e-4`
 - `--dynamics-reg-s 1e-4`
 - `--dynamics-reg-w 1e-4`
 - `--dynamics-reg-mu-h 1e-4`
 - `--dynamics-reg-b 1e-4`
 - `--dynamics-reg-c 1e-4`
+- `--dynamics-reg-spectral-abscissa 0.0`, deactivated by default
+- `--dynamics-reg-spectral-alpha 0.0`
 
 - Output:
 - `--output-dir /path/to/output`
@@ -99,7 +103,10 @@ Useful shell variables:
 - `LBFGS_MAXCOR`, `LBFGS_FTOL`, `LBFGS_GTOL`, `LBFGS_MAXLS`
 - `OPINF_REG_W`, `OPINF_REG_H`, `OPINF_REG_B`, `OPINF_REG_C`
 - `DECODER_REG_V1`, `DECODER_REG_V2`, `DECODER_REG_V0`
-- `DYNAMICS_REG_S`, `DYNAMICS_REG_W`, `DYNAMICS_REG_MU_H`, `DYNAMICS_REG_B`, `DYNAMICS_REG_C`
+- `DYNAMICS_REG_A`, `DYNAMICS_REG_S`, `DYNAMICS_REG_W`, `DYNAMICS_REG_MU_H`, `DYNAMICS_REG_B`, `DYNAMICS_REG_C`
+- `DYNAMICS_REG_SPECTRAL_ABSCISSA`, default `0.0`
+- `DYNAMICS_REG_SPECTRAL_ALPHA`, default `0.0`
+- `OLDGOAM=1` to pass `--oldgoam`
 - `OUTPUT_DIR`, default `demo/outputs/reduced_qoi_optimization_demo`
 
 Outputs are written under the selected `OUTPUT_DIR`. The latest top-level

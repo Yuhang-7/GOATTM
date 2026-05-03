@@ -113,6 +113,8 @@ class ReducedQoiTrainerTest(unittest.TestCase):
             self.assertIn("train_objective", first_record)
             self.assertIn("test_data_loss", first_record)
             self.assertIn("train_dynamics_regularization_loss", first_record)
+            self.assertIn("dynamics_a_symmetric_part_max_eigenvalue", first_record)
+            self.assertIn("dynamics_a_max_real_eigenvalue", first_record)
 
             config_record = json.loads(config_path.read_text(encoding="utf-8"))
             self.assertEqual(config_record["optimizer"], "adam")
@@ -146,6 +148,8 @@ class ReducedQoiTrainerTest(unittest.TestCase):
                 self.assertIn("mu_h", checkpoint.files)
                 self.assertIn("b_matrix", checkpoint.files)
                 self.assertIn("c_vector", checkpoint.files)
+                self.assertIn("dynamics_a_symmetric_part_max_eigenvalue", checkpoint.files)
+                self.assertIn("dynamics_a_max_real_eigenvalue", checkpoint.files)
 
             timing_record = json.loads(result.timing_json_path.read_text(encoding="utf-8"))
             self.assertGreater(len(timing_record["records"]), 0)
@@ -153,6 +157,8 @@ class ReducedQoiTrainerTest(unittest.TestCase):
             stdout_text = result.stdout_log_path.read_text(encoding="utf-8")
             self.assertIn("Starting GOATTM training run", stdout_text)
             self.assertIn("[iter 0000]", stdout_text)
+            self.assertIn("lam_max_symA=", stdout_text)
+            self.assertIn("max_Re_lamA=", stdout_text)
             self.assertIn("Completed GOATTM training run", stdout_text)
             stderr_text = result.stderr_log_path.read_text(encoding="utf-8")
             self.assertEqual(stderr_text, "")

@@ -70,6 +70,7 @@ class DemoConfig:
     latent_rank: int
     dynamic_form: str
     decoder_form: str
+    oldgoam_mode: bool
     max_dt: float
     time_integrator: str
     normalization_target_max_abs: float
@@ -100,11 +101,14 @@ class DemoConfig:
     decoder_reg_v1: float
     decoder_reg_v2: float
     decoder_reg_v0: float
+    dynamics_reg_a: float
     dynamics_reg_s: float
     dynamics_reg_w: float
     dynamics_reg_mu_h: float
     dynamics_reg_b: float
     dynamics_reg_c: float
+    dynamics_reg_spectral_abscissa: float
+    dynamics_reg_spectral_alpha: float
 
     output_dir: Path
 
@@ -131,6 +135,11 @@ def parse_args() -> DemoConfig:
     parser.add_argument("--latent-rank", type=int, default=4, help="Reduced latent dimension.")
     parser.add_argument("--dynamic-form", choices=("ABc", "AHBc"), default="AHBc", help="Reduced dynamics form.")
     parser.add_argument("--decoder-form", choices=("V1v", "V1V2v"), default="V1V2v", help="QoI decoder form.")
+    parser.add_argument(
+        "--oldgoam",
+        action="store_true",
+        help="Use direct-A oldGOAM-style AHBc dynamics instead of stabilized A=-SS^T+W dynamics.",
+    )
     parser.add_argument("--max-dt", type=float, default=0.01, help="Maximum rollout time step.")
     parser.add_argument(
         "--normalization-target-max-abs",
@@ -176,11 +185,24 @@ def parse_args() -> DemoConfig:
     parser.add_argument("--decoder-reg-v1", type=float, default=1e-7, help="Decoder V1 regularization.")
     parser.add_argument("--decoder-reg-v2", type=float, default=1e-7, help="Decoder V2 regularization.")
     parser.add_argument("--decoder-reg-v0", type=float, default=1e-7, help="Decoder v0 regularization.")
+    parser.add_argument("--dynamics-reg-a", type=float, default=1e-4, help="Training dynamics A regularization.")
     parser.add_argument("--dynamics-reg-s", type=float, default=1e-4, help="Training dynamics S regularization.")
     parser.add_argument("--dynamics-reg-w", type=float, default=1e-4, help="Training dynamics W regularization.")
     parser.add_argument("--dynamics-reg-mu-h", type=float, default=1e-4, help="Training dynamics mu_H regularization.")
     parser.add_argument("--dynamics-reg-b", type=float, default=1e-4, help="Training dynamics B regularization.")
     parser.add_argument("--dynamics-reg-c", type=float, default=1e-4, help="Training dynamics c regularization.")
+    parser.add_argument(
+        "--dynamics-reg-spectral-abscissa",
+        type=float,
+        default=0.0,
+        help="Optional softplus spectral-abscissa penalty coefficient on max eig((A+A.T)/2). Default keeps it deactivated.",
+    )
+    parser.add_argument(
+        "--dynamics-reg-spectral-alpha",
+        type=float,
+        default=0.0,
+        help="Shift alpha for the optional spectral-abscissa softplus penalty.",
+    )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Output directory.")
     args = parser.parse_args()
     config = DemoConfig(
@@ -192,6 +214,7 @@ def parse_args() -> DemoConfig:
         latent_rank=args.latent_rank,
         dynamic_form=args.dynamic_form,
         decoder_form=args.decoder_form,
+        oldgoam_mode=args.oldgoam,
         max_dt=args.max_dt,
         normalization_target_max_abs=args.normalization_target_max_abs,
         time_integrator=args.time_integrator,
@@ -218,11 +241,14 @@ def parse_args() -> DemoConfig:
         decoder_reg_v1=args.decoder_reg_v1,
         decoder_reg_v2=args.decoder_reg_v2,
         decoder_reg_v0=args.decoder_reg_v0,
+        dynamics_reg_a=args.dynamics_reg_a,
         dynamics_reg_s=args.dynamics_reg_s,
         dynamics_reg_w=args.dynamics_reg_w,
         dynamics_reg_mu_h=args.dynamics_reg_mu_h,
         dynamics_reg_b=args.dynamics_reg_b,
         dynamics_reg_c=args.dynamics_reg_c,
+        dynamics_reg_spectral_abscissa=args.dynamics_reg_spectral_abscissa,
+        dynamics_reg_spectral_alpha=args.dynamics_reg_spectral_alpha,
         output_dir=Path(args.output_dir),
     )
     validate_config(config)
@@ -287,11 +313,13 @@ def validate_config(config: DemoConfig) -> None:
         config.decoder_reg_v1,
         config.decoder_reg_v2,
         config.decoder_reg_v0,
+        config.dynamics_reg_a,
         config.dynamics_reg_s,
         config.dynamics_reg_w,
         config.dynamics_reg_mu_h,
         config.dynamics_reg_b,
         config.dynamics_reg_c,
+        config.dynamics_reg_spectral_abscissa,
     )
     if any(value < 0.0 for value in regularization_values):
         raise ValueError("regularization coefficients must be nonnegative.")
@@ -619,12 +647,13 @@ def run_demo(config: DemoConfig) -> dict[str, object] | None:
         ),
         dynamic_form=config.dynamic_form,
         decoder_form=config.decoder_form,
+        oldgoam_mode=config.oldgoam_mode,
     )
 
     trainer_config = ReducedQoiTrainerConfig(
         output_dir=config.output_dir / "runs",
         time_integrator=config.time_integrator,
-        run_name_prefix=f"goattm_demo_{config.optimizer}_{config.dynamic_form}_{config.decoder_form}_r{config.latent_rank}_ntrain{config.ntrain}_ntest{config.ntest}",
+        run_name_prefix=f"goattm_demo_{config.optimizer}_{'oldgoam_' if config.oldgoam_mode else ''}{config.dynamic_form}_{config.decoder_form}_r{config.latent_rank}_ntrain{config.ntrain}_ntest{config.ntest}",
         optimizer=config.optimizer,
         max_iterations=config.max_iterations,
         checkpoint_every=10,
@@ -661,11 +690,14 @@ def run_demo(config: DemoConfig) -> dict[str, object] | None:
             coeff_v0=config.decoder_reg_v0,
         ),
         dynamics_regularization=DynamicsTikhonovRegularization(
+            coeff_a=config.dynamics_reg_a,
             coeff_s=config.dynamics_reg_s,
             coeff_w=config.dynamics_reg_w,
             coeff_mu_h=config.dynamics_reg_mu_h,
             coeff_b=config.dynamics_reg_b,
             coeff_c=config.dynamics_reg_c,
+            coeff_spectral_abscissa=config.dynamics_reg_spectral_abscissa,
+            spectral_abscissa_alpha=config.dynamics_reg_spectral_alpha,
         ),
         max_dt=config.max_dt,
         config=trainer_config,
@@ -699,6 +731,7 @@ def run_demo(config: DemoConfig) -> dict[str, object] | None:
         "input_sampling": "uniform[-2,2] at t=0:0.1:1, cubic-spline interpolation",
         "output_definition": "q_j(t)=exp(a_j p(t)) + b_j (p(t)-a_j)^2",
         "latent_rank": config.latent_rank,
+        "oldgoam_mode": config.oldgoam_mode,
         "optimizer": config.optimizer,
         "max_iterations": trainer_config.max_iterations,
         "adam": {
@@ -735,11 +768,14 @@ def run_demo(config: DemoConfig) -> dict[str, object] | None:
             "coeff_v0": config.decoder_reg_v0,
         },
         "dynamics_regularization": {
+            "coeff_a": config.dynamics_reg_a,
             "coeff_s": config.dynamics_reg_s,
             "coeff_w": config.dynamics_reg_w,
             "coeff_mu_h": config.dynamics_reg_mu_h,
             "coeff_b": config.dynamics_reg_b,
             "coeff_c": config.dynamics_reg_c,
+            "coeff_spectral_abscissa": config.dynamics_reg_spectral_abscissa,
+            "spectral_abscissa_alpha": config.dynamics_reg_spectral_alpha,
         },
         "train_sample_count": len(opinf_result.latent_train_manifest.sample_ids),
         "test_sample_count": 0 if opinf_result.latent_test_manifest is None else len(opinf_result.latent_test_manifest.sample_ids),

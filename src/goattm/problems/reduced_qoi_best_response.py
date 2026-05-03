@@ -169,6 +169,8 @@ class DynamicsTikhonovRegularization:
     coeff_mu_h: float = 0.0
     coeff_b: float = 0.0
     coeff_c: float = 0.0
+    coeff_spectral_abscissa: float = 0.0
+    spectral_abscissa_alpha: float = 0.0
 
     def __post_init__(self) -> None:
         values = (
@@ -178,6 +180,7 @@ class DynamicsTikhonovRegularization:
             self.coeff_mu_h,
             self.coeff_b,
             self.coeff_c,
+            self.coeff_spectral_abscissa,
         )
         if any(value < 0.0 for value in values):
             raise ValueError("Dynamics Tikhonov coefficients must be nonnegative.")
@@ -1611,6 +1614,77 @@ def _pack_dynamic_hessian_action_vector(
     return pack_dynamics_gradient_vector(dynamics, gradients)
 
 
+def _softplus(value: float) -> float:
+    if value > 0.0:
+        return float(value + np.log1p(np.exp(-value)))
+    return float(np.log1p(np.exp(value)))
+
+
+def _sigmoid(value: float) -> float:
+    if value >= 0.0:
+        exp_neg = np.exp(-value)
+        return float(1.0 / (1.0 + exp_neg))
+    exp_pos = np.exp(value)
+    return float(exp_pos / (1.0 + exp_pos))
+
+
+def symmetric_part_largest_eigenvalue(a_matrix: np.ndarray) -> float:
+    sym_a = 0.5 * (np.asarray(a_matrix, dtype=np.float64) + np.asarray(a_matrix, dtype=np.float64).T)
+    eigenvalues = np.linalg.eigvalsh(sym_a)
+    return float(eigenvalues[-1])
+
+
+def spectral_abscissa_softplus_penalty(
+    a_matrix: np.ndarray,
+    coefficient: float,
+    alpha: float = 0.0,
+) -> float:
+    if coefficient == 0.0:
+        return 0.0
+    z = symmetric_part_largest_eigenvalue(a_matrix) - float(alpha)
+    smooth_positive_part = _softplus(z)
+    return float(coefficient) * smooth_positive_part * smooth_positive_part
+
+
+def spectral_abscissa_softplus_gradient_matrix(
+    a_matrix: np.ndarray,
+    coefficient: float,
+    alpha: float = 0.0,
+) -> np.ndarray:
+    a_array = np.asarray(a_matrix, dtype=np.float64)
+    if coefficient == 0.0:
+        return np.zeros_like(a_array, dtype=np.float64)
+    sym_a = 0.5 * (a_array + a_array.T)
+    eigenvalues, eigenvectors = np.linalg.eigh(sym_a)
+    z = float(eigenvalues[-1]) - float(alpha)
+    scale = float(coefficient) * 2.0 * _softplus(z) * _sigmoid(z)
+    dominant = eigenvectors[:, -1]
+    return scale * np.outer(dominant, dominant)
+
+
+def _spectral_regularization_gradient_vector(
+    dynamics: DynamicsLike,
+    regularization: DynamicsTikhonovRegularization,
+) -> np.ndarray:
+    a_grad = spectral_abscissa_softplus_gradient_matrix(
+        dynamics.a,
+        coefficient=regularization.coeff_spectral_abscissa,
+        alpha=regularization.spectral_abscissa_alpha,
+    )
+    gradients: dict[str, np.ndarray] = {"c": np.zeros_like(dynamics.c, dtype=np.float64)}
+    if not isinstance(dynamics, LinearDynamics):
+        gradients["mu_h"] = np.zeros_like(dynamics.mu_h, dtype=np.float64)
+    if isinstance(dynamics, StabilizedQuadraticDynamics):
+        s_grad, w_grad = dynamics.pullback_a_gradient_to_stabilized_params(a_grad)
+        gradients["s_params"] = s_grad
+        gradients["w_params"] = w_grad
+    else:
+        gradients["a"] = a_grad
+    if dynamics.b is not None:
+        gradients["b"] = np.zeros_like(dynamics.b, dtype=np.float64)
+    return pack_dynamics_gradient_vector(dynamics, gradients)
+
+
 def dynamics_regularization_loss(
     dynamics: DynamicsLike,
     regularization: DynamicsTikhonovRegularization,
@@ -1626,6 +1700,11 @@ def dynamics_regularization_loss(
     if dynamics.b is not None:
         loss += regularization.coeff_b * float(np.sum(dynamics.b**2))
     loss += regularization.coeff_c * float(np.sum(dynamics.c**2))
+    loss += spectral_abscissa_softplus_penalty(
+        dynamics.a,
+        coefficient=regularization.coeff_spectral_abscissa,
+        alpha=regularization.spectral_abscissa_alpha,
+    )
     return float(loss)
 
 
@@ -1641,6 +1720,18 @@ def dynamics_regularization_gradient_vector(
         gradients["w_params"] = 2.0 * regularization.coeff_w * np.asarray(dynamics.w_params, dtype=np.float64)
     else:
         gradients["a"] = 2.0 * regularization.coeff_a * np.asarray(dynamics.a, dtype=np.float64)
+    if regularization.coeff_spectral_abscissa > 0.0:
+        spectral_a_grad = spectral_abscissa_softplus_gradient_matrix(
+            dynamics.a,
+            coefficient=regularization.coeff_spectral_abscissa,
+            alpha=regularization.spectral_abscissa_alpha,
+        )
+        if isinstance(dynamics, StabilizedQuadraticDynamics):
+            spectral_s_grad, spectral_w_grad = dynamics.pullback_a_gradient_to_stabilized_params(spectral_a_grad)
+            gradients["s_params"] = gradients["s_params"] + spectral_s_grad
+            gradients["w_params"] = gradients["w_params"] + spectral_w_grad
+        else:
+            gradients["a"] = gradients["a"] + spectral_a_grad
     if dynamics.b is not None:
         gradients["b"] = 2.0 * regularization.coeff_b * np.asarray(dynamics.b, dtype=np.float64)
     return pack_dynamics_gradient_vector(dynamics, gradients)
@@ -1669,7 +1760,21 @@ def dynamics_regularization_hessian_action(
             raise ValueError("direction must provide b when dynamics has input matrix b.")
         blocks.append(2.0 * regularization.coeff_b * np.asarray(direction.b, dtype=np.float64).reshape(-1))
     blocks.append(2.0 * regularization.coeff_c * np.asarray(direction.c, dtype=np.float64).reshape(-1))
-    return np.concatenate(blocks, axis=0)
+    action = np.concatenate(blocks, axis=0)
+    if regularization.coeff_spectral_abscissa > 0.0:
+        parameters = dynamics_parameter_vector(dynamics)
+        direction_flat = np.asarray(direction_vector, dtype=np.float64).reshape(-1)
+        direction_norm = float(np.linalg.norm(direction_flat))
+        if direction_norm > 0.0:
+            step = 1.0e-6 * (1.0 + float(np.linalg.norm(parameters))) / direction_norm
+            plus = dynamics_from_parameter_vector(dynamics, parameters + step * direction_flat)
+            minus = dynamics_from_parameter_vector(dynamics, parameters - step * direction_flat)
+            spectral_action = (
+                _spectral_regularization_gradient_vector(plus, regularization)
+                - _spectral_regularization_gradient_vector(minus, regularization)
+            ) / (2.0 * step)
+            action = action + spectral_action
+    return action
 
 
 def decoder_regularization_loss(
