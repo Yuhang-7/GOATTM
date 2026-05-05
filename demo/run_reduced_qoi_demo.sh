@@ -80,11 +80,15 @@ OPINF_REG_C="${OPINF_REG_C:-1e-6}"
 DECODER_REG_V1="${DECODER_REG_V1:-1e-7}"
 DECODER_REG_V2="${DECODER_REG_V2:-1e-7}"
 DECODER_REG_V0="${DECODER_REG_V0:-1e-7}"
+DYNAMICS_REG_A="${DYNAMICS_REG_A:-1e-4}"
 DYNAMICS_REG_S="${DYNAMICS_REG_S:-1e-4}"
 DYNAMICS_REG_W="${DYNAMICS_REG_W:-1e-4}"
 DYNAMICS_REG_MU_H="${DYNAMICS_REG_MU_H:-1e-4}"
 DYNAMICS_REG_B="${DYNAMICS_REG_B:-1e-4}"
 DYNAMICS_REG_C="${DYNAMICS_REG_C:-1e-4}"
+DYNAMICS_REG_SPECTRAL_ABSCISSA="${DYNAMICS_REG_SPECTRAL_ABSCISSA:-0.0}"
+DYNAMICS_REG_SPECTRAL_ALPHA="${DYNAMICS_REG_SPECTRAL_ALPHA:-0.0}"
+OLDGOAM="${OLDGOAM:-0}"
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-fenicsx-clean}"
 GOATTM_SKIP_CONDA_ACTIVATE="${GOATTM_SKIP_CONDA_ACTIVATE:-0}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/demo/outputs/reduced_qoi_optimization_demo}"
@@ -167,12 +171,19 @@ PY_ARGS=(
   --decoder-reg-v1 "${DECODER_REG_V1}"
   --decoder-reg-v2 "${DECODER_REG_V2}"
   --decoder-reg-v0 "${DECODER_REG_V0}"
+  --dynamics-reg-a "${DYNAMICS_REG_A}"
   --dynamics-reg-s "${DYNAMICS_REG_S}"
   --dynamics-reg-w "${DYNAMICS_REG_W}"
   --dynamics-reg-mu-h "${DYNAMICS_REG_MU_H}"
   --dynamics-reg-b "${DYNAMICS_REG_B}"
   --dynamics-reg-c "${DYNAMICS_REG_C}"
+  --dynamics-reg-spectral-abscissa "${DYNAMICS_REG_SPECTRAL_ABSCISSA}"
+  --dynamics-reg-spectral-alpha "${DYNAMICS_REG_SPECTRAL_ALPHA}"
 )
+
+if [[ "${OLDGOAM}" == "1" ]]; then
+  PY_ARGS+=(--oldgoam)
+fi
 
 if [[ -n "${ADAM_GRADIENT_CLIP_NORM}" ]]; then
   PY_ARGS+=(--adam-gradient-clip-norm "${ADAM_GRADIENT_CLIP_NORM}")

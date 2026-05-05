@@ -57,11 +57,15 @@ OPINF_REG_C="${OPINF_REG_C:-1e-6}"
 DECODER_REG_V1="${DECODER_REG_V1:-1e-7}"
 DECODER_REG_V2="${DECODER_REG_V2:-1e-7}"
 DECODER_REG_V0="${DECODER_REG_V0:-1e-7}"
+DYNAMICS_REG_A="${DYNAMICS_REG_A:-1e-4}"
 DYNAMICS_REG_S="${DYNAMICS_REG_S:-1e-4}"
 DYNAMICS_REG_W="${DYNAMICS_REG_W:-1e-4}"
 DYNAMICS_REG_MU_H="${DYNAMICS_REG_MU_H:-1e-4}"
 DYNAMICS_REG_B="${DYNAMICS_REG_B:-1e-4}"
 DYNAMICS_REG_C="${DYNAMICS_REG_C:-1e-4}"
+DYNAMICS_REG_SPECTRAL_ABSCISSA="${DYNAMICS_REG_SPECTRAL_ABSCISSA:-0.0}"
+DYNAMICS_REG_SPECTRAL_ALPHA="${DYNAMICS_REG_SPECTRAL_ALPHA:-0.0}"
+OLDGOAM="${OLDGOAM:-0}"
 
 RUN_STEM="${RUN_STEM:-$(date +%Y%m%d_%H%M%S)_goattm_demo_ntrain${NTRAIN}_ntest${NTEST}_${OPTIMIZER}}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${REPO_ROOT}/demo/outputs/slurm_runs}"
@@ -146,11 +150,15 @@ export OPINF_REG_C
 export DECODER_REG_V1
 export DECODER_REG_V2
 export DECODER_REG_V0
+export DYNAMICS_REG_A
 export DYNAMICS_REG_S
 export DYNAMICS_REG_W
 export DYNAMICS_REG_MU_H
 export DYNAMICS_REG_B
 export DYNAMICS_REG_C
+export DYNAMICS_REG_SPECTRAL_ABSCISSA
+export DYNAMICS_REG_SPECTRAL_ALPHA
+export OLDGOAM
 
 for LATENT_RANK in $(seq "${LATENT_RANK_START}" "${LATENT_RANK_END}"); do
   RUN_TAG="${RUN_STEM}_r${LATENT_RANK}"
@@ -195,13 +203,19 @@ for LATENT_RANK in $(seq "${LATENT_RANK_START}" "${LATENT_RANK_END}"); do
     --decoder-reg-v1 "${DECODER_REG_V1}"
     --decoder-reg-v2 "${DECODER_REG_V2}"
     --decoder-reg-v0 "${DECODER_REG_V0}"
+    --dynamics-reg-a "${DYNAMICS_REG_A}"
     --dynamics-reg-s "${DYNAMICS_REG_S}"
     --dynamics-reg-w "${DYNAMICS_REG_W}"
     --dynamics-reg-mu-h "${DYNAMICS_REG_MU_H}"
     --dynamics-reg-b "${DYNAMICS_REG_B}"
     --dynamics-reg-c "${DYNAMICS_REG_C}"
+    --dynamics-reg-spectral-abscissa "${DYNAMICS_REG_SPECTRAL_ABSCISSA}"
+    --dynamics-reg-spectral-alpha "${DYNAMICS_REG_SPECTRAL_ALPHA}"
     --output-dir "${OUTPUT_DIR}"
   )
+  if [[ "${OLDGOAM}" == "1" ]]; then
+    PY_ARGS+=(--oldgoam)
+  fi
   if [[ -n "${ADAM_GRADIENT_CLIP_NORM}" ]]; then
     PY_ARGS+=(--adam-gradient-clip-norm "${ADAM_GRADIENT_CLIP_NORM}")
   fi
