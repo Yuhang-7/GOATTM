@@ -903,8 +903,20 @@ class ReducedQoiTrainer:
         test_data_loss = None
         test_relative_error = None
         if self.test_dataset_evaluator is not None and iteration % self.config.test_every == 0:
-            test_data_loss = self.test_dataset_evaluator.evaluate_data_loss(dynamics, train_result.decoder)
-            test_relative_error = self.test_dataset_evaluator.evaluate_relative_error(dynamics, train_result.decoder)
+            try:
+                test_data_loss = self.test_dataset_evaluator.evaluate_data_loss(dynamics, train_result.decoder)
+                test_relative_error = self.test_dataset_evaluator.evaluate_relative_error(dynamics, train_result.decoder)
+            except Exception as exc:
+                test_data_loss = float("inf")
+                test_relative_error = float("inf")
+                if self.context.rank == 0:
+                    self.logger.log_stderr(
+                        (
+                            f"Snapshot test rollout failed at iteration {iteration}: "
+                            f"{type(exc).__name__}: {exc}. Recording infinite test loss and continuing."
+                        ),
+                        echo=self.config.echo_progress,
+                    )
         gradient = np.asarray(train_result.reduced_objective_gradient, dtype=np.float64)
         parameter_vector = dynamics_parameter_vector(dynamics)
         dynamic_parameter_norm = float(np.linalg.norm(parameter_vector))
