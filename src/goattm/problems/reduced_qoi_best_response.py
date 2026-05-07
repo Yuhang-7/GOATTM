@@ -9,6 +9,7 @@ import numpy as np
 
 from goattm.core.parametrization import (
     compressed_h_gradient_to_mu_h,
+    skew_cp_direction_to_compressed_h,
     mu_h_to_compressed_h,
     quadratic_features,
     s_params_to_matrix,
@@ -21,6 +22,7 @@ from goattm.losses.qoi_loss import qoi_trajectory_loss, trapezoidal_rule_weights
 from goattm.models.linear_dynamics import LinearDynamics
 from goattm.models.quadratic_decoder import QuadraticDecoder
 from goattm.models.quadratic_dynamics import QuadraticDynamics
+from goattm.models.skew_cp_quadratic_dynamics import SkewCPQuadraticDynamics
 from goattm.models.stabilized_quadratic_dynamics import StabilizedQuadraticDynamics
 from goattm.problems.decoder_normal_equation import (
     DecoderNormalEquationSolveResult,
@@ -46,7 +48,7 @@ from goattm.solvers import (
 )
 
 
-DynamicsLike = LinearDynamics | QuadraticDynamics | StabilizedQuadraticDynamics
+DynamicsLike = LinearDynamics | QuadraticDynamics | SkewCPQuadraticDynamics | StabilizedQuadraticDynamics
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,9 @@ class DynamicsParameterDirection:
     a: np.ndarray | None = None
     s_params: np.ndarray | None = None
     w_params: np.ndarray | None = None
+    skew_u: np.ndarray | None = None
+    skew_v: np.ndarray | None = None
+    skew_z: np.ndarray | None = None
     b: np.ndarray | None = None
 
 
@@ -1254,6 +1259,9 @@ def dynamics_parameter_vector(dynamics: DynamicsLike) -> np.ndarray:
         blocks.append(dynamics.mu_h)
     elif isinstance(dynamics, LinearDynamics):
         blocks.append(dynamics.a.reshape(-1))
+    elif isinstance(dynamics, SkewCPQuadraticDynamics):
+        blocks.append(dynamics.a.reshape(-1))
+        blocks.extend([dynamics.skew_u, dynamics.skew_v, dynamics.skew_z])
     else:
         blocks.append(dynamics.a.reshape(-1))
         blocks.append(dynamics.mu_h)
@@ -1266,6 +1274,8 @@ def dynamics_parameter_vector(dynamics: DynamicsLike) -> np.ndarray:
 def dynamics_parameter_key(dynamics: DynamicsLike) -> str:
     if isinstance(dynamics, StabilizedQuadraticDynamics):
         tag = "stabilized"
+    elif isinstance(dynamics, SkewCPQuadraticDynamics):
+        tag = "skew_cp"
     elif isinstance(dynamics, LinearDynamics):
         tag = "linear"
     else:
@@ -1290,6 +1300,17 @@ def dynamics_from_parameter_vector(dynamics: DynamicsLike, vector: np.ndarray) -
             raise ValueError("Linear dynamics vector unpacking did not provide a matrix.")
         return LinearDynamics(
             a=direction.a,
+            b=direction.b,
+            c=direction.c,
+        )
+    if isinstance(dynamics, SkewCPQuadraticDynamics):
+        if direction.a is None or direction.skew_u is None or direction.skew_v is None or direction.skew_z is None:
+            raise ValueError("Skew-CP dynamics vector unpacking did not provide a/skew factors.")
+        return SkewCPQuadraticDynamics(
+            a=direction.a,
+            skew_u=direction.skew_u,
+            skew_v=direction.skew_v,
+            skew_z=direction.skew_z,
             b=direction.b,
             c=direction.c,
         )
@@ -1337,8 +1358,22 @@ def unpack_dynamics_parameter_vector(dynamics: DynamicsLike, vector: np.ndarray)
         offset += a_size
         s_params = None
         w_params = None
+    skew_u = None
+    skew_v = None
+    skew_z = None
     if isinstance(dynamics, LinearDynamics):
         mu_h = dynamics.mu_h.copy()
+    elif isinstance(dynamics, SkewCPQuadraticDynamics):
+        skew_u_size = dynamics.skew_u.size
+        skew_u = flat[offset : offset + skew_u_size].reshape(dynamics.skew_u.shape)
+        offset += skew_u_size
+        skew_v_size = dynamics.skew_v.size
+        skew_v = flat[offset : offset + skew_v_size].reshape(dynamics.skew_v.shape)
+        offset += skew_v_size
+        skew_z_size = dynamics.skew_z.size
+        skew_z = flat[offset : offset + skew_z_size].reshape(dynamics.skew_z.shape)
+        offset += skew_z_size
+        mu_h = np.zeros(0, dtype=np.float64)
     else:
         mu_h = flat[offset : offset + dynamics.mu_h.size].reshape(dynamics.mu_h.shape)
         offset += dynamics.mu_h.size
@@ -1348,7 +1383,17 @@ def unpack_dynamics_parameter_vector(dynamics: DynamicsLike, vector: np.ndarray)
     else:
         b = None
     c = flat[offset : offset + dynamics.c.size].reshape(dynamics.c.shape)
-    return DynamicsParameterDirection(mu_h=mu_h, c=c, a=a, s_params=s_params, w_params=w_params, b=b)
+    return DynamicsParameterDirection(
+        mu_h=mu_h,
+        c=c,
+        a=a,
+        s_params=s_params,
+        w_params=w_params,
+        skew_u=skew_u,
+        skew_v=skew_v,
+        skew_z=skew_z,
+        b=b,
+    )
 
 
 def pack_dynamics_gradient_vector(dynamics: DynamicsLike, gradients: dict[str, np.ndarray]) -> np.ndarray:
@@ -1358,6 +1403,9 @@ def pack_dynamics_gradient_vector(dynamics: DynamicsLike, gradients: dict[str, n
         blocks.append(gradients["mu_h"])
     elif isinstance(dynamics, LinearDynamics):
         blocks.append(gradients["a"])
+    elif isinstance(dynamics, SkewCPQuadraticDynamics):
+        blocks.append(gradients["a"])
+        blocks.extend([gradients["skew_u"], gradients["skew_v"], gradients["skew_z"]])
     else:
         blocks.append(gradients["a"])
         blocks.append(gradients["mu_h"])
@@ -1388,8 +1436,19 @@ def rhs_parameter_action(
         if direction.a is None:
             raise ValueError("direction must provide a for general dynamics.")
         delta_a = direction.a
-    delta_h = mu_h_to_compressed_h(direction.mu_h.astype(np.float64), dynamics.dimension)
-    action = delta_a @ state + delta_h @ quadratic_term + direction.c
+    if isinstance(dynamics, SkewCPQuadraticDynamics):
+        if direction.skew_u is None or direction.skew_v is None or direction.skew_z is None:
+            raise ValueError("direction must provide skew_u/skew_v/skew_z for skew-CP dynamics.")
+        delta_quad = dynamics.quadratic_parameter_action(
+            direction.skew_u,
+            direction.skew_v,
+            direction.skew_z,
+            state,
+        )
+    else:
+        delta_h = mu_h_to_compressed_h(direction.mu_h.astype(np.float64), dynamics.dimension)
+        delta_quad = delta_h @ quadratic_term
+    action = delta_a @ state + delta_quad + direction.c
     if dynamics.b is not None and direction.b is not None and input_function is not None:
         action = action + direction.b @ np.asarray(input_function(time), dtype=np.float64)
     return action
@@ -1427,7 +1486,19 @@ def _dynamics_direction_explicit_matrices(
         if direction.a is None:
             raise ValueError("direction must provide a for general dynamics.")
         delta_a = direction.a
-    delta_h = mu_h_to_compressed_h(direction.mu_h.astype(np.float64), dynamics.dimension)
+    if isinstance(dynamics, SkewCPQuadraticDynamics):
+        if direction.skew_u is None or direction.skew_v is None or direction.skew_z is None:
+            raise ValueError("direction must provide skew_u/skew_v/skew_z for skew-CP dynamics.")
+        delta_h = skew_cp_direction_to_compressed_h(
+            dynamics.skew_u.astype(np.float64),
+            dynamics.skew_v.astype(np.float64),
+            dynamics.skew_z.astype(np.float64),
+            direction.skew_u.astype(np.float64),
+            direction.skew_v.astype(np.float64),
+            direction.skew_z.astype(np.float64),
+        )
+    else:
+        delta_h = mu_h_to_compressed_h(direction.mu_h.astype(np.float64), dynamics.dimension)
     return delta_a, delta_h
 
 
@@ -1581,6 +1652,8 @@ def _pack_dynamic_hessian_action_vector(
     delta_b_grad: np.ndarray | None,
     delta_c_grad: np.ndarray,
 ) -> np.ndarray:
+    if isinstance(dynamics, SkewCPQuadraticDynamics):
+        raise NotImplementedError("Reduced Hessian actions are not implemented for skew-CP dynamics yet.")
     gradients: dict[str, np.ndarray] = {"c": delta_c_grad}
     if not isinstance(dynamics, LinearDynamics):
         gradients["mu_h"] = compressed_h_gradient_to_mu_h(delta_h_grad.astype(np.float64), dynamics.dimension)
@@ -1621,7 +1694,11 @@ def dynamics_regularization_loss(
         loss += regularization.coeff_w * float(np.sum(dynamics.w_params**2))
     else:
         loss += regularization.coeff_a * float(np.sum(dynamics.a**2))
-    if not isinstance(dynamics, LinearDynamics):
+    if isinstance(dynamics, SkewCPQuadraticDynamics):
+        loss += regularization.coeff_mu_h * float(
+            np.sum(dynamics.skew_u**2) + np.sum(dynamics.skew_v**2) + np.sum(dynamics.skew_z**2)
+        )
+    elif not isinstance(dynamics, LinearDynamics):
         loss += regularization.coeff_mu_h * float(np.sum(dynamics.mu_h**2))
     if dynamics.b is not None:
         loss += regularization.coeff_b * float(np.sum(dynamics.b**2))
@@ -1634,7 +1711,11 @@ def dynamics_regularization_gradient_vector(
     regularization: DynamicsTikhonovRegularization,
 ) -> np.ndarray:
     gradients: dict[str, np.ndarray] = {"c": 2.0 * regularization.coeff_c * np.asarray(dynamics.c, dtype=np.float64)}
-    if not isinstance(dynamics, LinearDynamics):
+    if isinstance(dynamics, SkewCPQuadraticDynamics):
+        gradients["skew_u"] = 2.0 * regularization.coeff_mu_h * np.asarray(dynamics.skew_u, dtype=np.float64)
+        gradients["skew_v"] = 2.0 * regularization.coeff_mu_h * np.asarray(dynamics.skew_v, dtype=np.float64)
+        gradients["skew_z"] = 2.0 * regularization.coeff_mu_h * np.asarray(dynamics.skew_z, dtype=np.float64)
+    elif not isinstance(dynamics, LinearDynamics):
         gradients["mu_h"] = 2.0 * regularization.coeff_mu_h * np.asarray(dynamics.mu_h, dtype=np.float64)
     if isinstance(dynamics, StabilizedQuadraticDynamics):
         gradients["s_params"] = 2.0 * regularization.coeff_s * np.asarray(dynamics.s_params, dtype=np.float64)
@@ -1658,11 +1739,18 @@ def dynamics_regularization_hessian_action(
             raise ValueError("direction must provide s_params and w_params for stabilized dynamics.")
         blocks.append(2.0 * regularization.coeff_s * np.asarray(direction.s_params, dtype=np.float64).reshape(-1))
         blocks.append(2.0 * regularization.coeff_w * np.asarray(direction.w_params, dtype=np.float64).reshape(-1))
+    elif isinstance(dynamics, SkewCPQuadraticDynamics):
+        if direction.a is None or direction.skew_u is None or direction.skew_v is None or direction.skew_z is None:
+            raise ValueError("direction must provide a/skew factors for skew-CP dynamics.")
+        blocks.append(2.0 * regularization.coeff_a * np.asarray(direction.a, dtype=np.float64).reshape(-1))
+        blocks.append(2.0 * regularization.coeff_mu_h * np.asarray(direction.skew_u, dtype=np.float64).reshape(-1))
+        blocks.append(2.0 * regularization.coeff_mu_h * np.asarray(direction.skew_v, dtype=np.float64).reshape(-1))
+        blocks.append(2.0 * regularization.coeff_mu_h * np.asarray(direction.skew_z, dtype=np.float64).reshape(-1))
     else:
         if direction.a is None:
             raise ValueError("direction must provide a for general dynamics.")
         blocks.append(2.0 * regularization.coeff_a * np.asarray(direction.a, dtype=np.float64).reshape(-1))
-    if not isinstance(dynamics, LinearDynamics):
+    if not isinstance(dynamics, (LinearDynamics, SkewCPQuadraticDynamics)):
         blocks.append(2.0 * regularization.coeff_mu_h * np.asarray(direction.mu_h, dtype=np.float64).reshape(-1))
     if dynamics.b is not None:
         if direction.b is None:
@@ -1710,7 +1798,11 @@ def _zero_decoder_gradients(decoder: QuadraticDecoder) -> dict[str, np.ndarray]:
 
 def _zero_dynamics_gradients(dynamics: DynamicsLike) -> dict[str, np.ndarray]:
     gradients: dict[str, np.ndarray] = {"c": np.zeros_like(dynamics.c, dtype=np.float64)}
-    if not isinstance(dynamics, LinearDynamics):
+    if isinstance(dynamics, SkewCPQuadraticDynamics):
+        gradients["skew_u"] = np.zeros_like(dynamics.skew_u, dtype=np.float64)
+        gradients["skew_v"] = np.zeros_like(dynamics.skew_v, dtype=np.float64)
+        gradients["skew_z"] = np.zeros_like(dynamics.skew_z, dtype=np.float64)
+    elif not isinstance(dynamics, LinearDynamics):
         gradients["mu_h"] = np.zeros_like(dynamics.mu_h, dtype=np.float64)
     if isinstance(dynamics, StabilizedQuadraticDynamics):
         gradients["s_params"] = np.zeros_like(dynamics.s_params, dtype=np.float64)

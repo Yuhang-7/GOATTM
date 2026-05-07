@@ -2,6 +2,7 @@ from .core import (
     a_from_stabilized_params,
     a_gradient_to_stabilized_params,
     compressed_h_gradient_to_mu_h,
+    compressed_h_gradient_to_skew_cp,
     compressed_h_to_mu_h,
     compressed_quadratic_dimension,
     energy_preserving_defect,
@@ -12,6 +13,12 @@ from .core import (
     quadratic_eval,
     quadratic_features,
     quadratic_jacobian_matrix,
+    skew_cp_direction_to_compressed_h,
+    skew_cp_parameter_action,
+    skew_cp_quadratic_eval,
+    skew_cp_quadratic_eval_batch,
+    skew_cp_quadratic_jacobian_matrix,
+    skew_cp_to_compressed_h,
     skew_symmetric_dimension,
     s_params_to_matrix,
     upper_triangular_dimension,
@@ -20,6 +27,7 @@ from .core import (
 from .models.linear_dynamics import LinearDynamics
 from .models.quadratic_dynamics import QuadraticDynamics
 from .models.quadratic_decoder import QuadraticDecoder
+from .models.skew_cp_quadratic_dynamics import SkewCPQuadraticDynamics
 from .models.stabilized_quadratic_dynamics import StabilizedQuadraticDynamics
 from .data import (
     NpzQoiSample,
@@ -164,6 +172,7 @@ __all__ = [
     "QuadraticDecoder",
     "LinearDynamics",
     "QuadraticDynamics",
+    "SkewCPQuadraticDynamics",
     "StabilizedQuadraticDynamics",
     "a_from_stabilized_params",
     "a_gradient_to_stabilized_params",
@@ -172,6 +181,7 @@ __all__ = [
     "build_piecewise_linear_input_function",
     "build_energy_preserving_compressed_h_basis",
     "compressed_h_gradient_to_mu_h",
+    "compressed_h_gradient_to_skew_cp",
     "compressed_h_to_mu_h",
     "compressed_quadratic_dimension",
     "compute_midpoint_discrete_adjoint",
@@ -251,6 +261,12 @@ __all__ = [
     "quadratic_eval",
     "quadratic_features",
     "quadratic_jacobian_matrix",
+    "skew_cp_direction_to_compressed_h",
+    "skew_cp_parameter_action",
+    "skew_cp_quadratic_eval",
+    "skew_cp_quadratic_eval_batch",
+    "skew_cp_quadratic_jacobian_matrix",
+    "skew_cp_to_compressed_h",
     "qoi_trajectory_loss",
     "qoi_trajectory_loss_and_partials",
     "RolloutResult",

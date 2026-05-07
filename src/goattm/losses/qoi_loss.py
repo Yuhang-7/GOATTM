@@ -9,6 +9,7 @@ from goattm.core.parametrization import quadratic_features
 from goattm.models.linear_dynamics import LinearDynamics
 from goattm.models.quadratic_decoder import QuadraticDecoder
 from goattm.models.quadratic_dynamics import QuadraticDynamics
+from goattm.models.skew_cp_quadratic_dynamics import SkewCPQuadraticDynamics
 from goattm.models.stabilized_quadratic_dynamics import StabilizedQuadraticDynamics
 from goattm.runtime import timed
 from goattm.solvers.explicit_euler import (
@@ -23,7 +24,7 @@ from goattm.solvers.rk4 import (
 from goattm.solvers.time_integration import TimeIntegrator, rollout_to_final_time, rollout_to_observation_times, validate_time_integrator
 
 
-DynamicsLike = LinearDynamics | QuadraticDynamics | StabilizedQuadraticDynamics
+DynamicsLike = LinearDynamics | QuadraticDynamics | SkewCPQuadraticDynamics | StabilizedQuadraticDynamics
 
 
 @dataclass(frozen=True)
@@ -182,7 +183,12 @@ def _pullback_dynamics_gradients(
     c_grad: np.ndarray,
 ) -> dict[str, np.ndarray]:
     gradients: dict[str, np.ndarray] = {"c": c_grad}
-    if not isinstance(dynamics, LinearDynamics):
+    if isinstance(dynamics, SkewCPQuadraticDynamics):
+        skew_u_grad, skew_v_grad, skew_z_grad = dynamics.pullback_h_gradient_to_skew_cp(h_grad)
+        gradients["skew_u"] = skew_u_grad
+        gradients["skew_v"] = skew_v_grad
+        gradients["skew_z"] = skew_z_grad
+    elif not isinstance(dynamics, LinearDynamics):
         gradients["mu_h"] = dynamics.pullback_h_gradient_to_mu_h(h_grad)
     if isinstance(dynamics, StabilizedQuadraticDynamics):
         s_grad, w_grad = dynamics.pullback_a_gradient_to_stabilized_params(a_grad)

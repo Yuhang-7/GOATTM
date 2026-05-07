@@ -23,12 +23,13 @@ from goattm.data import NpzQoiSample, NpzSampleManifest, load_npz_qoi_sample, lo
 from goattm.models.linear_dynamics import LinearDynamics
 from goattm.models.quadratic_decoder import QuadraticDecoder
 from goattm.models.quadratic_dynamics import QuadraticDynamics
+from goattm.models.skew_cp_quadratic_dynamics import SkewCPQuadraticDynamics
 from goattm.models.stabilized_quadratic_dynamics import StabilizedQuadraticDynamics
 from goattm.preprocess.normalization import DatasetNormalizationStats
 from goattm.solvers import rollout_to_observation_times, validate_time_integrator
 
 
-DynamicsLike = LinearDynamics | QuadraticDynamics | StabilizedQuadraticDynamics
+DynamicsLike = LinearDynamics | QuadraticDynamics | SkewCPQuadraticDynamics | StabilizedQuadraticDynamics
 
 
 @dataclass(frozen=True)
@@ -252,10 +253,10 @@ def load_checkpoint_models(path: Path) -> tuple[QuadraticDecoder, DynamicsLike]:
             form=decoder_form,
         )
         dynamics_type = str(data["dynamics_type"].item())
-        mu_h = np.asarray(data["mu_h"], dtype=np.float64)
         c = np.asarray(data["c_vector"], dtype=np.float64)
         b = None if "b_matrix" not in data.files else np.asarray(data["b_matrix"], dtype=np.float64)
         if dynamics_type == "stabilized":
+            mu_h = np.asarray(data["mu_h"], dtype=np.float64)
             dynamics = StabilizedQuadraticDynamics(
                 s_params=np.asarray(data["s_params"], dtype=np.float64),
                 w_params=np.asarray(data["w_params"], dtype=np.float64),
@@ -270,9 +271,19 @@ def load_checkpoint_models(path: Path) -> tuple[QuadraticDecoder, DynamicsLike]:
                 b=b,
             )
         elif dynamics_type == "general":
+            mu_h = np.asarray(data["mu_h"], dtype=np.float64)
             dynamics = QuadraticDynamics(
                 a=np.asarray(data["a_matrix"], dtype=np.float64),
                 mu_h=mu_h,
+                c=c,
+                b=b,
+            )
+        elif dynamics_type == "skew_cp":
+            dynamics = SkewCPQuadraticDynamics(
+                a=np.asarray(data["a_matrix"], dtype=np.float64),
+                skew_u=np.asarray(data["skew_u"], dtype=np.float64),
+                skew_v=np.asarray(data["skew_v"], dtype=np.float64),
+                skew_z=np.asarray(data["skew_z"], dtype=np.float64),
                 c=c,
                 b=b,
             )

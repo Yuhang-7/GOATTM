@@ -18,6 +18,7 @@ from goattm.data import NpzSampleManifest
 from goattm.models.linear_dynamics import LinearDynamics
 from goattm.models.quadratic_decoder import QuadraticDecoder
 from goattm.models.quadratic_dynamics import QuadraticDynamics
+from goattm.models.skew_cp_quadratic_dynamics import SkewCPQuadraticDynamics
 from goattm.models.stabilized_quadratic_dynamics import StabilizedQuadraticDynamics
 from goattm.problems import (
     DecoderTikhonovRegularization,
@@ -36,12 +37,14 @@ from goattm.runtime import DistributedContext, FunctionTimer, timed, use_functio
 from goattm.solvers import TimeIntegrator, validate_time_integrator
 
 
-DynamicsLike = LinearDynamics | QuadraticDynamics | StabilizedQuadraticDynamics
+DynamicsLike = LinearDynamics | QuadraticDynamics | SkewCPQuadraticDynamics | StabilizedQuadraticDynamics
 
 
 def _dynamics_type_name(dynamics: DynamicsLike) -> str:
     if isinstance(dynamics, StabilizedQuadraticDynamics):
         return "stabilized"
+    if isinstance(dynamics, SkewCPQuadraticDynamics):
+        return "skew_cp"
     if isinstance(dynamics, LinearDynamics):
         return "linear"
     return "general"
@@ -165,6 +168,22 @@ def _dynamics_component_norms(dynamics: DynamicsLike) -> dict[str, float]:
                 "s_param_l2_norm": float(np.linalg.norm(dynamics.s_params)),
                 "w_param_l2_norm": float(np.linalg.norm(dynamics.w_params)),
                 "mu_h_l2_norm": float(np.linalg.norm(dynamics.mu_h)),
+                "skew_cp_l2_norm": 0.0,
+            }
+        )
+    elif isinstance(dynamics, SkewCPQuadraticDynamics):
+        norms.update(
+            {
+                "s_param_l2_norm": 0.0,
+                "w_param_l2_norm": 0.0,
+                "mu_h_l2_norm": 0.0,
+                "skew_cp_l2_norm": float(
+                    np.sqrt(
+                        np.sum(dynamics.skew_u**2)
+                        + np.sum(dynamics.skew_v**2)
+                        + np.sum(dynamics.skew_z**2)
+                    )
+                ),
             }
         )
     else:
@@ -173,6 +192,7 @@ def _dynamics_component_norms(dynamics: DynamicsLike) -> dict[str, float]:
                 "s_param_l2_norm": 0.0,
                 "w_param_l2_norm": 0.0,
                 "mu_h_l2_norm": float(np.linalg.norm(dynamics.mu_h)),
+                "skew_cp_l2_norm": 0.0,
             }
         )
     return norms
@@ -569,9 +589,15 @@ class ReducedQoiTrainingLogger:
         if isinstance(dynamics, StabilizedQuadraticDynamics):
             npz_payload["s_params"] = dynamics.s_params
             npz_payload["w_params"] = dynamics.w_params
+        elif isinstance(dynamics, SkewCPQuadraticDynamics):
+            npz_payload["a_matrix"] = dynamics.a
+            npz_payload["skew_u"] = dynamics.skew_u
+            npz_payload["skew_v"] = dynamics.skew_v
+            npz_payload["skew_z"] = dynamics.skew_z
         else:
             npz_payload["a_matrix"] = dynamics.a
-        npz_payload["mu_h"] = dynamics.mu_h
+        if hasattr(dynamics, "mu_h"):
+            npz_payload["mu_h"] = dynamics.mu_h
         npz_payload["c_vector"] = dynamics.c
         if dynamics.b is not None:
             npz_payload["b_matrix"] = dynamics.b
@@ -595,9 +621,15 @@ class ReducedQoiTrainingLogger:
         if isinstance(dynamics, StabilizedQuadraticDynamics):
             payload["s_params"] = dynamics.s_params
             payload["w_params"] = dynamics.w_params
+        elif isinstance(dynamics, SkewCPQuadraticDynamics):
+            payload["a_matrix"] = dynamics.a
+            payload["skew_u"] = dynamics.skew_u
+            payload["skew_v"] = dynamics.skew_v
+            payload["skew_z"] = dynamics.skew_z
         else:
             payload["a_matrix"] = dynamics.a
-        payload["mu_h"] = dynamics.mu_h
+        if hasattr(dynamics, "mu_h"):
+            payload["mu_h"] = dynamics.mu_h
         payload["c_vector"] = dynamics.c
         if dynamics.b is not None:
             payload["b_matrix"] = dynamics.b
@@ -641,6 +673,7 @@ class ReducedQoiTrainingLogger:
                 "dynamics_s_param_l2_norm": component_norms["s_param_l2_norm"],
                 "dynamics_w_param_l2_norm": component_norms["w_param_l2_norm"],
                 "dynamics_mu_h_l2_norm": component_norms["mu_h_l2_norm"],
+                "dynamics_skew_cp_l2_norm": component_norms["skew_cp_l2_norm"],
             }
         )
         with self.metrics_path.open("a", encoding="utf-8") as fh:
@@ -740,6 +773,7 @@ class ReducedQoiTrainingLogger:
             f"latest_dynamics_s_param_l2_norm={component_norms['s_param_l2_norm']:.16e}",
             f"latest_dynamics_w_param_l2_norm={component_norms['w_param_l2_norm']:.16e}",
             f"latest_dynamics_mu_h_l2_norm={component_norms['mu_h_l2_norm']:.16e}",
+            f"latest_dynamics_skew_cp_l2_norm={component_norms['skew_cp_l2_norm']:.16e}",
             f"latest_test_data_loss={snapshot.test_data_loss if snapshot.test_data_loss is not None else 'NA'}",
             f"latest_test_relative_error={snapshot.test_relative_error if snapshot.test_relative_error is not None else 'NA'}",
             f"latest_gradient_norm={snapshot.gradient_norm:.16e}",
@@ -1530,9 +1564,15 @@ def write_training_checkpoint(
     if isinstance(dynamics, StabilizedQuadraticDynamics):
         payload["s_params"] = dynamics.s_params
         payload["w_params"] = dynamics.w_params
+    elif isinstance(dynamics, SkewCPQuadraticDynamics):
+        payload["a_matrix"] = dynamics.a
+        payload["skew_u"] = dynamics.skew_u
+        payload["skew_v"] = dynamics.skew_v
+        payload["skew_z"] = dynamics.skew_z
     else:
         payload["a_matrix"] = dynamics.a
-    payload["mu_h"] = dynamics.mu_h
+    if hasattr(dynamics, "mu_h"):
+        payload["mu_h"] = dynamics.mu_h
     payload["c_vector"] = dynamics.c
     if dynamics.b is not None:
         payload["b_matrix"] = dynamics.b

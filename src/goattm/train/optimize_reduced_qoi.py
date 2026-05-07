@@ -6,13 +6,14 @@ from pathlib import Path
 from goattm.data import NpzSampleManifest, load_npz_sample_manifest, make_npz_train_test_split
 from goattm.models.quadratic_decoder import QuadraticDecoder
 from goattm.models.quadratic_dynamics import QuadraticDynamics
+from goattm.models.skew_cp_quadratic_dynamics import SkewCPQuadraticDynamics
 from goattm.models.stabilized_quadratic_dynamics import StabilizedQuadraticDynamics
 from goattm.problems import DecoderTikhonovRegularization, DynamicsTikhonovRegularization
 from goattm.runtime import DistributedContext
 from goattm.train.reduced_qoi_trainer import ReducedQoiTrainer, ReducedQoiTrainerConfig, ReducedQoiTrainingResult
 
 
-DynamicsLike = QuadraticDynamics | StabilizedQuadraticDynamics
+DynamicsLike = QuadraticDynamics | SkewCPQuadraticDynamics | StabilizedQuadraticDynamics
 
 
 @dataclass(frozen=True)

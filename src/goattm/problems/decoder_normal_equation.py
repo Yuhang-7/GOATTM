@@ -40,13 +40,14 @@ from goattm.losses.qoi_loss import trapezoidal_rule_weights_from_times
 from goattm.models.linear_dynamics import LinearDynamics
 from goattm.models.quadratic_decoder import QuadraticDecoder
 from goattm.models.quadratic_dynamics import QuadraticDynamics
+from goattm.models.skew_cp_quadratic_dynamics import SkewCPQuadraticDynamics
 from goattm.models.stabilized_quadratic_dynamics import StabilizedQuadraticDynamics
 from goattm.runtime import timed
 from goattm.runtime.distributed import DistributedContext
 from goattm.solvers.implicit_midpoint import rollout_implicit_midpoint_to_observation_times
 
 
-DynamicsLike = LinearDynamics | QuadraticDynamics | StabilizedQuadraticDynamics
+DynamicsLike = LinearDynamics | QuadraticDynamics | SkewCPQuadraticDynamics | StabilizedQuadraticDynamics
 
 
 @dataclass(frozen=True)

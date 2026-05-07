@@ -44,3 +44,6 @@ module_test/implicit_explicit_solver/*.png
 
 # Chinese prompt/report drafts; keep the English/body files tracked.
 *_zhcn*
+
+# Local ADR application workspace and copied GOAM data
+application/ADR/

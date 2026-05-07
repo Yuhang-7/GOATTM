@@ -23,7 +23,7 @@ optimization, and homotopy-guarded implicit nonlinear solves.`
 
 Useful companion documents:
 
-- `prompting_files/description.md`: implementation-aligned library description
-- `prompting_files/nonlinear_solve_revisit.md`: nonlinear-solve stability notes and current homotopy status
+- `prompting_files/en/description.md`: implementation-aligned library description
+- `prompting_files/en/nonlinear_solve_revisit.md`: nonlinear-solve stability notes and current homotopy status
 - `documents/high_level_flyer.md`: short, user-facing overview
 - `documents/detailed_documentation.md`: more detailed architecture and workflow guide

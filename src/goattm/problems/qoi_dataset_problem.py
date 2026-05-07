@@ -10,12 +10,13 @@ from goattm.losses.qoi_loss import ObservationAlignedRolloutLossGradientResult, 
 from goattm.models.linear_dynamics import LinearDynamics
 from goattm.models.quadratic_decoder import QuadraticDecoder
 from goattm.models.quadratic_dynamics import QuadraticDynamics
+from goattm.models.skew_cp_quadratic_dynamics import SkewCPQuadraticDynamics
 from goattm.models.stabilized_quadratic_dynamics import StabilizedQuadraticDynamics
 from goattm.runtime.distributed import DistributedContext, sum_array_mapping
 from goattm.solvers import TimeIntegrator
 
 
-DynamicsLike = LinearDynamics | QuadraticDynamics | StabilizedQuadraticDynamics
+DynamicsLike = LinearDynamics | QuadraticDynamics | SkewCPQuadraticDynamics | StabilizedQuadraticDynamics
 
 
 @dataclass(frozen=True)
@@ -98,7 +99,11 @@ def _zero_decoder_gradients(decoder: QuadraticDecoder) -> dict[str, np.ndarray]:
 
 def _zero_dynamics_gradients(dynamics: DynamicsLike) -> dict[str, np.ndarray]:
     gradients: dict[str, np.ndarray] = {"c": np.zeros_like(dynamics.c, dtype=np.float64)}
-    if not isinstance(dynamics, LinearDynamics):
+    if isinstance(dynamics, SkewCPQuadraticDynamics):
+        gradients["skew_u"] = np.zeros_like(dynamics.skew_u, dtype=np.float64)
+        gradients["skew_v"] = np.zeros_like(dynamics.skew_v, dtype=np.float64)
+        gradients["skew_z"] = np.zeros_like(dynamics.skew_z, dtype=np.float64)
+    elif not isinstance(dynamics, LinearDynamics):
         gradients["mu_h"] = np.zeros_like(dynamics.mu_h, dtype=np.float64)
     if isinstance(dynamics, StabilizedQuadraticDynamics):
         gradients["s_params"] = np.zeros_like(dynamics.s_params, dtype=np.float64)
