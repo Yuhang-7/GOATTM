@@ -1,8 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 
 import torch
+
+
+def _mpi_environment_is_active() -> bool:
+    markers = (
+        "OMPI_COMM_WORLD_SIZE",
+        "PMI_SIZE",
+        "PMIX_RANK",
+        "MPI_LOCALNRANKS",
+        "SLURM_NTASKS",
+    )
+    return any(name in os.environ for name in markers)
 
 
 @dataclass(frozen=True)
@@ -14,6 +26,8 @@ class TorchMPIContext:
 
     @classmethod
     def from_mpi4py(cls) -> "TorchMPIContext":
+        if not _mpi_environment_is_active():
+            return cls()
         try:
             from mpi4py import MPI  # type: ignore
         except Exception:
