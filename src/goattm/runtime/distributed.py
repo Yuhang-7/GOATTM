@@ -97,6 +97,26 @@ class DistributedContext:
         self._comm.Allreduce(array, reduced, op=mpi_module.SUM)
         return reduced
 
+    def reduce_array_sum_to_root(self, value: np.ndarray, root: int = 0) -> np.ndarray | None:
+        array = np.asarray(value, dtype=np.float64)
+        self.ensure_same_array_shape(array, label="reduce_array_sum_to_root")
+        if root < 0 or root >= self.size:
+            raise ValueError(f"root must satisfy 0 <= root < size, got root={root}, size={self.size}")
+        if self._comm is None:
+            return array.copy()
+        if not _comm_uses_mpi4py(self._comm):
+            if hasattr(self._comm, "reduce"):
+                reduced = self._comm.reduce(array, root=root)
+                return None if self.rank != root else np.asarray(reduced, dtype=np.float64)
+            reduced = np.asarray(self._comm.allreduce(array), dtype=np.float64)
+            return reduced if self.rank == root else None
+        mpi_module = _load_mpi_module()
+        if mpi_module is None:
+            raise RuntimeError("mpi4py communicator detected but mpi4py could not be imported.")
+        reduced = np.zeros_like(array) if self.rank == root else None
+        self._comm.Reduce(array, reduced, op=mpi_module.SUM, root=root)
+        return reduced
+
     def allreduce_array_max(self, value: np.ndarray) -> np.ndarray:
         array = np.asarray(value, dtype=np.float64)
         self.ensure_same_array_shape(array, label="allreduce_array_max")
