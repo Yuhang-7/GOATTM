@@ -455,13 +455,12 @@ class ObservationAlignedBestResponseEvaluator:
         local_normal_matrix = np.zeros((feature_dim, feature_dim), dtype=np.float64)
         local_rhs = np.zeros((feature_dim, decoder_template.output_dimension), dtype=np.float64)
         for rollout_entry in forward_cache.local_rollouts:
-            sample_normal, sample_rhs = _assemble_decoder_normal_terms_from_cached_rollout(
+            _accumulate_decoder_normal_terms_from_cached_rollout(
+                local_normal_matrix=local_normal_matrix,
+                local_rhs=local_rhs,
                 rollout_entry=rollout_entry,
-                decoder_output_dimension=decoder_template.output_dimension,
                 decoder_form=decoder_template.form,
             )
-            local_normal_matrix += sample_normal
-            local_rhs += sample_rhs
 
         system = DecoderNormalEquationSystem(
             latent_dimension=decoder_template.latent_dimension,
@@ -1186,23 +1185,28 @@ def build_reduced_objective_workflow(
     )
 
 
-def _assemble_decoder_normal_terms_from_cached_rollout(
+def _accumulate_decoder_normal_terms_from_cached_rollout(
+    local_normal_matrix: np.ndarray,
+    local_rhs: np.ndarray,
     rollout_entry: CachedObservationRollout,
-    decoder_output_dimension: int,
     decoder_form: str = "V1V2v",
-) -> tuple[np.ndarray, np.ndarray]:
-    feature_dim = decoder_feature_dimension(rollout_entry.observed_states.shape[1], decoder_form)
-    sample_normal = np.zeros((feature_dim, feature_dim), dtype=np.float64)
-    sample_rhs = np.zeros((feature_dim, decoder_output_dimension), dtype=np.float64)
+) -> None:
+    """Accumulate one sample into the rank-local decoder normal equation.
+
+    This avoids allocating a dense sample-local normal matrix with the same
+    shape as local_normal_matrix. For quadratic decoders that matrix scales
+    like O(r^4), so keeping only the rank-local accumulator materially lowers
+    peak memory for large latent ranks.
+    """
+
     for state, target, weight in zip(
         rollout_entry.observed_states,
         rollout_entry.sample.qoi_observations,
         rollout_entry.observation_weights,
     ):
         phi = decoder_feature_vector(state, decoder_form)
-        sample_normal += weight * np.outer(phi, phi)
-        sample_rhs += weight * np.outer(phi, target)
-    return sample_normal, sample_rhs
+        local_normal_matrix += weight * np.outer(phi, phi)
+        local_rhs += weight * np.outer(phi, target)
 
 
 @timed("goattm.problems.solve_decoder_linear_system")
