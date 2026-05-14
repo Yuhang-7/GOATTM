@@ -77,9 +77,9 @@ class DecoderNormalEquationSystem:
     output_dimension: int
     decoder_form: str
     local_normal_matrix: np.ndarray
-    global_normal_matrix: np.ndarray
+    global_normal_matrix: np.ndarray | None
     local_rhs: np.ndarray
-    global_rhs: np.ndarray
+    global_rhs: np.ndarray | None
     regularization_diagonal: np.ndarray
     local_sample_count: int
     global_sample_count: int
@@ -93,6 +93,8 @@ class DecoderNormalEquationSystem:
 
     @property
     def regularized_global_normal_matrix(self) -> np.ndarray:
+        if self.global_normal_matrix is None:
+            raise RuntimeError("global normal matrix is only materialized on the solve root.")
         return self.global_normal_matrix + np.diag(self.regularization_diagonal)
 
 
@@ -175,9 +177,9 @@ def assemble_decoder_normal_equation_from_npz_dataset(
         output_dimension=decoder_template.output_dimension,
         decoder_form=decoder_template.form,
         local_normal_matrix=local_normal_matrix,
-        global_normal_matrix=context.allreduce_array_sum(local_normal_matrix),
+        global_normal_matrix=None,
         local_rhs=local_rhs,
-        global_rhs=context.allreduce_array_sum(local_rhs),
+        global_rhs=None,
         regularization_diagonal=regularization.diagonal(decoder_template.latent_dimension, decoder_template.form),
         local_sample_count=len(local_sample_ids),
         global_sample_count=context.allreduce_int_sum(len(local_sample_ids)),
@@ -198,9 +200,16 @@ def solve_decoder_normal_equation(
     if solve_root < 0 or solve_root >= context.size:
         raise ValueError(f"solve_root must satisfy 0 <= solve_root < size, got root={solve_root}, size={context.size}")
 
-    local_solution = np.zeros_like(system.global_rhs, dtype=np.float64)
+    global_normal_matrix = context.reduce_array_sum_to_root(system.local_normal_matrix, root=solve_root)
+    global_rhs = context.reduce_array_sum_to_root(system.local_rhs, root=solve_root)
+    local_solution = np.zeros((system.feature_dimension, system.output_dimension), dtype=np.float64)
     if context.rank == solve_root:
-        local_solution = np.linalg.solve(system.regularized_global_normal_matrix, system.global_rhs)
+        if global_normal_matrix is None or global_rhs is None:
+            raise RuntimeError("decoder normal equation reduction did not materialize on solve root.")
+        local_solution = np.linalg.solve(
+            global_normal_matrix + np.diag(system.regularization_diagonal),
+            global_rhs,
+        )
     solution_matrix = context.bcast_array(local_solution, root=solve_root)
     decoder = _decoder_from_solution_matrix(
         latent_dimension=system.latent_dimension,
