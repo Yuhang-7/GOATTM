@@ -546,13 +546,13 @@ def _fit_stabilized_dynamics_from_latent_dataset(
         feature_dimension=local_normal.shape[0],
     )
     reduce_start = time.perf_counter()
-    global_normal = context.allreduce_array_sum(local_normal)
-    global_rhs = context.allreduce_array_sum(local_rhs)
+    global_normal = context.reduce_array_sum_to_root(local_normal, root=0)
+    global_rhs = context.reduce_array_sum_to_root(local_rhs, root=0)
     global_target_sumsq = context.allreduce_scalar_sum(local_target_sumsq)
     _write_opinf_debug(
         context,
         debug_log_path,
-        "normal_allreduce_done",
+        "normal_reduce_done",
         attempt=attempt,
         elapsed_seconds=time.perf_counter() - reduce_start,
         target_sumsq=float(global_target_sumsq),
@@ -567,7 +567,12 @@ def _fit_stabilized_dynamics_from_latent_dataset(
     diagonal[offset : offset + rank * input_dim] = regularization.coeff_b
     diagonal[offset + rank * input_dim :] = regularization.coeff_c
     solve_start = time.perf_counter()
-    theta = np.linalg.solve(global_normal + np.diag(diagonal), global_rhs)
+    theta = np.zeros(feature_dim, dtype=np.float64)
+    if context.rank == 0:
+        if global_normal is None or global_rhs is None:
+            raise RuntimeError("OpInf normal equation reduction did not materialize on solve root.")
+        theta = np.linalg.solve(global_normal + np.diag(diagonal), global_rhs)
+    theta = context.bcast_array(theta, root=0)
     _write_opinf_debug(
         context,
         debug_log_path,
@@ -685,8 +690,8 @@ def _fit_linear_dynamics_from_latent_dataset(
         context=context,
     )
     global_step_count = context.allreduce_int_sum(local_step_count)
-    global_normal = context.allreduce_array_sum(local_normal)
-    global_rhs = context.allreduce_array_sum(local_rhs)
+    global_normal = context.reduce_array_sum_to_root(local_normal, root=0)
+    global_rhs = context.reduce_array_sum_to_root(local_rhs, root=0)
     global_target_sumsq = context.allreduce_scalar_sum(local_target_sumsq)
     input_dim = _infer_input_dimension(manifest)
     feature_dim = rank * rank + rank * input_dim + rank
@@ -695,7 +700,12 @@ def _fit_linear_dynamics_from_latent_dataset(
     offset = rank * rank
     diagonal[offset : offset + rank * input_dim] = regularization.coeff_b
     diagonal[offset + rank * input_dim :] = regularization.coeff_c
-    theta = np.linalg.solve(global_normal + np.diag(diagonal), global_rhs)
+    theta = np.zeros(feature_dim, dtype=np.float64)
+    if context.rank == 0:
+        if global_normal is None or global_rhs is None:
+            raise RuntimeError("OpInf normal equation reduction did not materialize on solve root.")
+        theta = np.linalg.solve(global_normal + np.diag(diagonal), global_rhs)
+    theta = context.bcast_array(theta, root=0)
     a = theta[: rank * rank].reshape((rank, rank)).copy()
     offset = rank * rank
     if input_dim > 0:
