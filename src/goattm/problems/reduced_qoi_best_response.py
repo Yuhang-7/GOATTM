@@ -444,9 +444,9 @@ class ObservationAlignedBestResponseEvaluator:
             latent_dimension=decoder_template.latent_dimension,
             output_dimension=decoder_template.output_dimension,
             local_normal_matrix=local_normal_matrix,
-            global_normal_matrix=self.context.allreduce_array_sum(local_normal_matrix),
+            global_normal_matrix=None,
             local_rhs=local_rhs,
-            global_rhs=self.context.allreduce_array_sum(local_rhs),
+            global_rhs=None,
             regularization_diagonal=regularization.diagonal(decoder_template.latent_dimension),
             local_sample_count=forward_cache.local_sample_count,
             global_sample_count=forward_cache.global_sample_count,
@@ -1184,9 +1184,16 @@ def solve_decoder_linear_system(
     context: DistributedContext,
     solve_root: int = 0,
 ) -> DecoderNormalEquationSolveResult:
-    solution_matrix = np.zeros_like(system.global_rhs, dtype=np.float64)
+    global_normal_matrix = context.reduce_array_sum_to_root(system.local_normal_matrix, root=solve_root)
+    global_rhs = context.reduce_array_sum_to_root(system.local_rhs, root=solve_root)
+    solution_matrix = np.zeros((system.feature_dimension, system.output_dimension), dtype=np.float64)
     if context.rank == solve_root:
-        solution_matrix = np.linalg.solve(system.regularized_global_normal_matrix, system.global_rhs)
+        if global_normal_matrix is None or global_rhs is None:
+            raise RuntimeError("decoder normal equation reduction did not materialize on solve root.")
+        solution_matrix = np.linalg.solve(
+            global_normal_matrix + np.diag(system.regularization_diagonal),
+            global_rhs,
+        )
     solution_matrix = context.bcast_array(solution_matrix, root=solve_root)
     decoder = matrix_to_decoder(system.latent_dimension, system.output_dimension, solution_matrix)
     return DecoderNormalEquationSolveResult(decoder=decoder, system=system, solution_matrix=solution_matrix)
@@ -1199,9 +1206,15 @@ def solve_decoder_best_response_action_matrix(
     context: DistributedContext,
     solve_root: int = 0,
 ) -> np.ndarray:
+    global_normal_matrix = context.reduce_array_sum_to_root(system.local_normal_matrix, root=solve_root)
     local_solution = np.zeros_like(mixed_action, dtype=np.float64)
     if context.rank == solve_root:
-        local_solution = np.linalg.solve(system.regularized_global_normal_matrix, -mixed_action)
+        if global_normal_matrix is None:
+            raise RuntimeError("decoder normal equation reduction did not materialize on solve root.")
+        local_solution = np.linalg.solve(
+            global_normal_matrix + np.diag(system.regularization_diagonal),
+            -mixed_action,
+        )
     return context.bcast_array(local_solution, root=solve_root)
 
 

@@ -61,6 +61,13 @@ class _FakeReductionBroadcastComm:
             raise RuntimeError("No array reduction values remain in fake communicator.")
         recvbuf[...] = self._reduced_arrays.pop(0)
 
+    def reduce(self, value, root: int = 0):
+        _ = value
+        if not self._reduced_arrays:
+            raise RuntimeError("No array reduction values remain in fake communicator.")
+        reduced = self._reduced_arrays.pop(0).copy()
+        return reduced if self._rank == root else None
+
     def bcast(self, value, root: int = 0):
         return self._broadcast_value.copy()
 
@@ -210,7 +217,7 @@ class DecoderNormalEquationTest(unittest.TestCase):
             fake_comm = _FakeReductionBroadcastComm(
                 rank=1,
                 size=2,
-                reduced_arrays=[serial_system.global_normal_matrix, serial_system.global_rhs],
+                reduced_arrays=[serial_system.local_normal_matrix, serial_system.local_rhs],
                 reduced_scalars=[serial_system.global_sample_count, serial_system.global_observation_count],
                 broadcast_value=decoder_parameter_matrix(serial_result.decoder),
             )
