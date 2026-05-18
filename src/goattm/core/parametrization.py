@@ -289,6 +289,44 @@ def skew_cp_parameter_action(
     )
 
 
+def skew_cp_quadratic_parameter_gradient(
+    u_matrix: np.ndarray,
+    v_matrix: np.ndarray,
+    z_matrix: np.ndarray,
+    state: np.ndarray,
+    adjoint: np.ndarray,
+    scale: float = 1.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Pull back scale * adjoint^T H(state,state) to skew-CP factors.
+
+    This is the direct low-rank adjoint of skew_cp_quadratic_eval. It avoids
+    forming a compressed H-gradient or a dense third-order tensor.
+    """
+    d, _ = _validate_skew_cp_factors(u_matrix, v_matrix, z_matrix)
+    if state.ndim != 1 or state.shape[0] != d:
+        raise ValueError(f"state must have shape ({d},), got {state.shape}")
+    if adjoint.ndim != 1 or adjoint.shape[0] != d:
+        raise ValueError(f"adjoint must have shape ({d},), got {adjoint.shape}")
+
+    alpha = u_matrix.T @ state
+    beta = v_matrix.T @ state
+    gamma = z_matrix.T @ state
+    lambda_u = u_matrix.T @ adjoint
+    lambda_v = v_matrix.T @ adjoint
+
+    factor = 2.0 * float(scale)
+    du = factor * (
+        adjoint[:, None] * (gamma * beta)[None, :]
+        - state[:, None] * (gamma * lambda_v)[None, :]
+    )
+    dv = factor * (
+        state[:, None] * (gamma * lambda_u)[None, :]
+        - adjoint[:, None] * (gamma * alpha)[None, :]
+    )
+    dz = factor * state[:, None] * (beta * lambda_u - alpha * lambda_v)[None, :]
+    return du, dv, dz
+
+
 def skew_cp_to_compressed_h(
     u_matrix: np.ndarray,
     v_matrix: np.ndarray,

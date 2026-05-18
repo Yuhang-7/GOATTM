@@ -8,6 +8,7 @@ import numpy as np
 from goattm.core.parametrization import (
     compressed_h_gradient_to_skew_cp,
     skew_cp_parameter_action,
+    skew_cp_quadratic_parameter_gradient,
     skew_cp_quadratic_eval,
     skew_cp_quadratic_jacobian_matrix,
     skew_cp_to_compressed_h,
@@ -156,6 +157,23 @@ class SkewCPQuadraticDynamics:
             d_skew_v.astype(np.float64),
             d_skew_z.astype(np.float64),
             state.astype(np.float64),
+        )
+
+    def quadratic_parameter_gradient(
+        self,
+        state: np.ndarray,
+        adjoint: np.ndarray,
+        scale: float = 1.0,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        self.validate_state(state, "state")
+        self.validate_state(adjoint, "adjoint")
+        return skew_cp_quadratic_parameter_gradient(
+            self.skew_u.astype(np.float64),
+            self.skew_v.astype(np.float64),
+            self.skew_z.astype(np.float64),
+            state.astype(np.float64),
+            adjoint.astype(np.float64),
+            scale=float(scale),
         )
 
     def pullback_h_gradient_to_skew_cp(self, h_grad: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
