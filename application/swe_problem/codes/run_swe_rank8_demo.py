@@ -357,6 +357,7 @@ def run_swe_demo(config: SweDemoConfig) -> dict[str, object] | None:
         max_iter_newton=40,
     )
     result = trainer.train(opinf_result.dynamics)
+    cleanup_record = opinf_result.cleanup_materialized_sample_data(context=context)
     if context.rank != 0:
         return None
 
@@ -425,6 +426,7 @@ def run_swe_demo(config: SweDemoConfig) -> dict[str, object] | None:
         "timing_summary_path": str(result.timing_summary_path),
         "stdout_log_path": str(result.stdout_log_path),
         "stderr_log_path": str(result.stderr_log_path),
+        "opinf_materialized_sample_cleanup": cleanup_record,
     }
     summary_path = config.output_dir / "latest_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
