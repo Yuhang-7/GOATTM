@@ -7,6 +7,7 @@ import numpy as np
 
 from goattm.core.parametrization import quadratic_features
 from goattm.models.quadratic_dynamics import QuadraticDynamics
+from goattm.models.skew_cp_quadratic_dynamics import SkewCPQuadraticDynamics
 from goattm.runtime import timed
 from goattm.solvers.explicit_euler import _quadratic_features_directional_derivative
 from goattm.solvers.implicit_midpoint import RolloutResult
@@ -334,6 +335,110 @@ def accumulate_rk4_parameter_gradients(
         if b_grad is not None and db is not None:
             b_grad += db
     return a_grad, h_grad, b_grad, c_grad
+
+
+@timed("goattm.solvers.accumulate_rk4_skew_cp_parameter_gradients")
+def accumulate_rk4_skew_cp_parameter_gradients(
+    dynamics: SkewCPQuadraticDynamics,
+    rollout: RolloutResult,
+    adjoints: np.ndarray,
+    input_function: Callable[[float], np.ndarray] | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, np.ndarray]:
+    _validate_base_rollout(rollout)
+    if adjoints.shape != rollout.states.shape:
+        raise ValueError(f"adjoints must have shape {rollout.states.shape}, got {adjoints.shape}")
+
+    a_grad = np.zeros((dynamics.dimension, dynamics.dimension), dtype=np.float64)
+    skew_u_grad = np.zeros_like(dynamics.skew_u, dtype=np.float64)
+    skew_v_grad = np.zeros_like(dynamics.skew_v, dtype=np.float64)
+    skew_z_grad = np.zeros_like(dynamics.skew_z, dtype=np.float64)
+    c_grad = np.zeros(dynamics.dimension, dtype=np.float64)
+    b_grad = None if dynamics.b is None else np.zeros_like(dynamics.b)
+
+    for step_idx in range(rollout.accepted_steps):
+        state = rollout.states[step_idx]
+        time = float(rollout.times[step_idx])
+        dt = float(rollout.dt_history[step_idx])
+        _, stages = rk4_step_with_stages(dynamics, state, dt, time=time, input_function=input_function)
+        _, da, du, dv, dz, db, dc = _rk4_reverse_step_skew_cp(
+            dynamics=dynamics,
+            stages=stages,
+            dt=dt,
+            adjoint_next=adjoints[step_idx + 1],
+            input_function=input_function,
+        )
+        a_grad += da
+        skew_u_grad += du
+        skew_v_grad += dv
+        skew_z_grad += dz
+        c_grad += dc
+        if b_grad is not None and db is not None:
+            b_grad += db
+    return a_grad, skew_u_grad, skew_v_grad, skew_z_grad, b_grad, c_grad
+
+
+def _rk4_reverse_step_skew_cp(
+    dynamics: SkewCPQuadraticDynamics,
+    stages: Rk4StepStages,
+    dt: float,
+    adjoint_next: np.ndarray,
+    input_function: Callable[[float], np.ndarray] | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, np.ndarray]:
+    state_bar = np.asarray(adjoint_next, dtype=np.float64).copy()
+    k1_bar = (dt / 6.0) * adjoint_next
+    k2_bar = (dt / 3.0) * adjoint_next
+    k3_bar = (dt / 3.0) * adjoint_next
+    k4_bar = (dt / 6.0) * adjoint_next
+
+    a_grad = np.zeros((dynamics.dimension, dynamics.dimension), dtype=np.float64)
+    skew_u_grad = np.zeros_like(dynamics.skew_u, dtype=np.float64)
+    skew_v_grad = np.zeros_like(dynamics.skew_v, dtype=np.float64)
+    skew_z_grad = np.zeros_like(dynamics.skew_z, dtype=np.float64)
+    c_grad = np.zeros(dynamics.dimension, dtype=np.float64)
+    b_grad = None if dynamics.b is None else np.zeros_like(dynamics.b)
+
+    y4_bar = dynamics.rhs_jacobian(stages.y4).T @ k4_bar
+    _accumulate_stage_skew_cp_parameter_gradients(dynamics, stages.y4, stages.t4, k4_bar, a_grad, skew_u_grad, skew_v_grad, skew_z_grad, b_grad, c_grad, input_function)
+    state_bar += y4_bar
+    k3_bar = k3_bar + dt * y4_bar
+
+    y3_bar = dynamics.rhs_jacobian(stages.y3).T @ k3_bar
+    _accumulate_stage_skew_cp_parameter_gradients(dynamics, stages.y3, stages.t3, k3_bar, a_grad, skew_u_grad, skew_v_grad, skew_z_grad, b_grad, c_grad, input_function)
+    state_bar += y3_bar
+    k2_bar = k2_bar + 0.5 * dt * y3_bar
+
+    y2_bar = dynamics.rhs_jacobian(stages.y2).T @ k2_bar
+    _accumulate_stage_skew_cp_parameter_gradients(dynamics, stages.y2, stages.t2, k2_bar, a_grad, skew_u_grad, skew_v_grad, skew_z_grad, b_grad, c_grad, input_function)
+    state_bar += y2_bar
+    k1_bar = k1_bar + 0.5 * dt * y2_bar
+
+    y1_bar = dynamics.rhs_jacobian(stages.y1).T @ k1_bar
+    _accumulate_stage_skew_cp_parameter_gradients(dynamics, stages.y1, stages.t1, k1_bar, a_grad, skew_u_grad, skew_v_grad, skew_z_grad, b_grad, c_grad, input_function)
+    state_bar += y1_bar
+    return state_bar, a_grad, skew_u_grad, skew_v_grad, skew_z_grad, b_grad, c_grad
+
+
+def _accumulate_stage_skew_cp_parameter_gradients(
+    dynamics: SkewCPQuadraticDynamics,
+    stage_state: np.ndarray,
+    stage_time: float,
+    stage_adjoint: np.ndarray,
+    a_grad: np.ndarray,
+    skew_u_grad: np.ndarray,
+    skew_v_grad: np.ndarray,
+    skew_z_grad: np.ndarray,
+    b_grad: np.ndarray | None,
+    c_grad: np.ndarray,
+    input_function: Callable[[float], np.ndarray] | None,
+) -> None:
+    a_grad += np.outer(stage_adjoint, stage_state)
+    du, dv, dz = dynamics.quadratic_parameter_gradient(stage_state, stage_adjoint)
+    skew_u_grad += du
+    skew_v_grad += dv
+    skew_z_grad += dz
+    c_grad += stage_adjoint
+    if b_grad is not None and input_function is not None:
+        b_grad += np.outer(stage_adjoint, np.asarray(input_function(stage_time), dtype=np.float64))
 
 
 def _rk4_reverse_step(
