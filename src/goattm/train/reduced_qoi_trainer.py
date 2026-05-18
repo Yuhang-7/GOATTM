@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import sys
 import time
 import traceback
@@ -985,6 +986,19 @@ class ReducedQoiTrainer:
             train_result=train_result,
         )
 
+    def _lbfgs_debug_enabled(self) -> bool:
+        return os.environ.get("GOATTM_LBFGS_DEBUG_TIMING", "").strip().lower() in {"1", "true", "yes", "on"}
+
+    def _lbfgs_debug_log(self, message: str) -> None:
+        if not self._lbfgs_debug_enabled():
+            return
+        rank = self.context.rank
+        size = self.context.size
+        if rank not in {0, 1, 2, 3} and rank % 64 != 0:
+            return
+        timestamp = datetime.now().isoformat(timespec="seconds")
+        print(f"[lbfgs-debug {timestamp} rank={rank}/{size}] {message}", flush=True)
+
     def _lbfgs_command_failure_record(self, exc: Exception) -> dict[str, Any]:
         record: dict[str, Any] = {
             "rank": self.context.rank,
@@ -1034,12 +1048,21 @@ class ReducedQoiTrainer:
                 raise RuntimeError(f"Invalid root-led L-BFGS command: {command!r}")
             op = command.get("op")
             if op == "evaluate":
+                t_eval = time.perf_counter()
+                self._lbfgs_debug_log("worker evaluate start")
                 try:
                     self._lbfgs_evaluate_vector(initial_dynamics, np.asarray(command["vector"], dtype=np.float64))
                     local_failure = None
                 except Exception as exc:
                     local_failure = self._lbfgs_command_failure_record(exc)
+                self._lbfgs_debug_log(
+                    f"worker evaluate done status={'ok' if local_failure is None else 'failure'} "
+                    f"elapsed={time.perf_counter() - t_eval:.3f}s"
+                )
+                t_collect = time.perf_counter()
+                self._lbfgs_debug_log("worker collect failures start")
                 self._lbfgs_collect_command_failures(local_failure)
+                self._lbfgs_debug_log(f"worker collect failures done elapsed={time.perf_counter() - t_collect:.3f}s")
             elif op == "snapshot":
                 try:
                     final_snapshot = self._lbfgs_snapshot_from_vector(
@@ -1117,6 +1140,7 @@ class ReducedQoiTrainer:
         previous_callback_vector = last_logged_vector.copy()
         callback_iteration = 0
         lbfgs_failure_count = 0
+        lbfgs_eval_count = 0
 
         def local_evaluate(vector: np.ndarray) -> ReducedQoiBestResponseResult:
             nonlocal last_eval_vector, last_eval_result
@@ -1133,7 +1157,10 @@ class ReducedQoiTrainer:
             if last_eval_vector is not None and np.array_equal(candidate, last_eval_vector):
                 return last_eval_result  # type: ignore[return-value]
             if using_workers:
+                t_bcast = time.perf_counter()
+                self._lbfgs_debug_log(f"root bcast evaluate start parameter_norm={np.linalg.norm(candidate):.6e}")
                 self.context.bcast_object({"op": "evaluate", "vector": candidate}, root=optimizer_root)
+                self._lbfgs_debug_log(f"root bcast evaluate done elapsed={time.perf_counter() - t_bcast:.3f}s")
             local_failure = None
             result = None
             try:
@@ -1144,7 +1171,13 @@ class ReducedQoiTrainer:
             else:
                 local_exception = None
             if using_workers:
+                t_collect = time.perf_counter()
+                self._lbfgs_debug_log("root collect failures start")
                 failures = self._lbfgs_collect_command_failures(local_failure)
+                self._lbfgs_debug_log(
+                    f"root collect failures done elapsed={time.perf_counter() - t_collect:.3f}s "
+                    f"failure_count={len(failures)}"
+                )
                 if failures:
                     if local_exception is not None:
                         raise local_exception
@@ -1198,12 +1231,28 @@ class ReducedQoiTrainer:
             return snapshot  # type: ignore[return-value]
 
         def objective_and_gradient(vector: np.ndarray) -> tuple[float, np.ndarray]:
-            nonlocal lbfgs_failure_count
+            nonlocal lbfgs_failure_count, lbfgs_eval_count
             candidate = np.asarray(vector, dtype=np.float64).copy()
+            lbfgs_eval_count += 1
+            eval_id = lbfgs_eval_count
+            t_objective = time.perf_counter()
+            self._lbfgs_debug_log(
+                f"objective start eval={eval_id} parameter_norm={np.linalg.norm(candidate):.6e}"
+            )
             try:
                 result = dispatch_evaluate(candidate)
-                return float(result.objective_value), np.asarray(result.gradient, dtype=np.float64)
+                objective = float(result.objective_value)
+                gradient = np.asarray(result.gradient, dtype=np.float64)
+                self._lbfgs_debug_log(
+                    f"objective done eval={eval_id} elapsed={time.perf_counter() - t_objective:.3f}s "
+                    f"objective={objective:.6e} grad_norm={np.linalg.norm(gradient):.6e}"
+                )
+                return objective, gradient
             except Exception as exc:
+                self._lbfgs_debug_log(
+                    f"objective exception eval={eval_id} elapsed={time.perf_counter() - t_objective:.3f}s "
+                    f"{type(exc).__name__}: {exc}"
+                )
                 lbfgs_failure_count += 1
                 reference = x0 if last_eval_vector is None else last_eval_vector
                 delta = candidate - reference
@@ -1265,7 +1314,9 @@ class ReducedQoiTrainer:
             last_logged_vector = candidate
 
         try:
+            self._lbfgs_debug_log("initial snapshot start")
             initial_snapshot = dispatch_snapshot(iteration=0, vector=x0, step_norm=0.0)
+            self._lbfgs_debug_log("initial snapshot done")
             if iteration_offset != 0:
                 initial_snapshot = ReducedQoiTrainingSnapshot(
                     iteration=iteration_offset,
@@ -1293,6 +1344,7 @@ class ReducedQoiTrainer:
                 max_iterations=iteration_limit,
             )
 
+            self._lbfgs_debug_log(f"scipy minimize start method={scipy_method} options={scipy_options}")
             opt_result = minimize(
                 objective_and_gradient,
                 x0=x0,
@@ -1300,6 +1352,10 @@ class ReducedQoiTrainer:
                 jac=True,
                 callback=callback,
                 options=scipy_options,
+            )
+            self._lbfgs_debug_log(
+                f"scipy minimize done success={opt_result.success} status={opt_result.status} "
+                f"nit={getattr(opt_result, 'nit', 'NA')} nfev={getattr(opt_result, 'nfev', 'NA')}"
             )
 
             final_vector = np.asarray(opt_result.x, dtype=np.float64).copy()

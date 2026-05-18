@@ -1217,14 +1217,12 @@ def solve_decoder_linear_system(
 ) -> DecoderNormalEquationSolveResult:
     global_normal_matrix = context.reduce_array_sum_to_root(system.local_normal_matrix, root=solve_root)
     global_rhs = context.reduce_array_sum_to_root(system.local_rhs, root=solve_root)
-    solution_matrix = np.zeros((system.feature_dimension, system.output_dimension), dtype=np.float64)
+    solution_matrix = np.zeros_like(system.local_rhs, dtype=np.float64)
     if context.rank == solve_root:
         if global_normal_matrix is None or global_rhs is None:
-            raise RuntimeError("decoder normal equation reduction did not materialize on solve root.")
-        solution_matrix = np.linalg.solve(
-            global_normal_matrix + np.diag(system.regularization_diagonal),
-            global_rhs,
-        )
+            raise RuntimeError("Root rank did not receive reduced decoder best-response terms.")
+        regularized_normal_matrix = global_normal_matrix + np.diag(system.regularization_diagonal)
+        solution_matrix = np.linalg.solve(regularized_normal_matrix, global_rhs)
     solution_matrix = context.bcast_array(solution_matrix, root=solve_root)
     decoder = matrix_to_decoder(system.latent_dimension, system.output_dimension, solution_matrix)
     return DecoderNormalEquationSolveResult(decoder=decoder, system=system, solution_matrix=solution_matrix)
@@ -1241,11 +1239,9 @@ def solve_decoder_best_response_action_matrix(
     local_solution = np.zeros_like(mixed_action, dtype=np.float64)
     if context.rank == solve_root:
         if global_normal_matrix is None:
-            raise RuntimeError("decoder normal equation reduction did not materialize on solve root.")
-        local_solution = np.linalg.solve(
-            global_normal_matrix + np.diag(system.regularization_diagonal),
-            -mixed_action,
-        )
+            raise RuntimeError("Root rank did not receive reduced decoder best-response normal matrix.")
+        regularized_normal_matrix = global_normal_matrix + np.diag(system.regularization_diagonal)
+        local_solution = np.linalg.solve(regularized_normal_matrix, -mixed_action)
     return context.bcast_array(local_solution, root=solve_root)
 
 
