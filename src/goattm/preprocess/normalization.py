@@ -267,22 +267,38 @@ def _materialize_normalized_manifest_partition(
         output_path = destination_root / f"{idx:06d}_{manifest.sample_ids[idx]}.npz"
         normalized_paths.append(output_path)
 
-    for local_index, (sample_id, path) in enumerate(manifest.entries_for_rank(context.rank, context.size)):
-        global_index = manifest.sample_ids.index(sample_id)
-        sample = load_npz_qoi_sample(path)
-        normalized = normalize_npz_qoi_sample(sample, stats)
-        metadata = dict(normalized.metadata or {})
-        metadata["split"] = split_name
-        save_npz_qoi_sample(
-            normalized_paths[global_index],
-            NpzQoiSample(
-                sample_id=normalized.sample_id,
-                observation_times=normalized.observation_times,
-                u0=normalized.u0,
-                qoi_observations=normalized.qoi_observations,
-                input_times=normalized.input_times,
-                input_values=normalized.input_values,
-                metadata=metadata,
-            ),
+    # Use a single writer for materialized normalized samples. The previous
+    # rank-partitioned writer could leave a partial directory on Stampede3
+    # under multi-node runs, after which other ranks would read a manifest that
+    # referenced files not yet visible or never written. Normalization is a
+    # preprocessing step, so reliability is more important than parallel writes.
+    if context.rank == 0:
+        for global_index, path in enumerate(absolute_paths):
+            sample = load_npz_qoi_sample(path)
+            normalized = normalize_npz_qoi_sample(sample, stats)
+            metadata = dict(normalized.metadata or {})
+            metadata["split"] = split_name
+            save_npz_qoi_sample(
+                normalized_paths[global_index],
+                NpzQoiSample(
+                    sample_id=normalized.sample_id,
+                    observation_times=normalized.observation_times,
+                    u0=normalized.u0,
+                    qoi_observations=normalized.qoi_observations,
+                    input_times=normalized.input_times,
+                    input_values=normalized.input_values,
+                    metadata=metadata,
+                ),
+            )
+
+    context.barrier()
+    missing_count = 0
+    if context.rank == 0:
+        missing = [path for path in normalized_paths if not path.exists()]
+        missing_count = len(missing)
+    global_missing_count = context.allreduce_int_sum(missing_count)
+    if global_missing_count:
+        raise FileNotFoundError(
+            f"Normalized {split_name} materialization is incomplete: {global_missing_count} files are missing under {destination_root}."
         )
     return tuple(normalized_paths)

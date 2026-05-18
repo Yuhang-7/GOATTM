@@ -56,17 +56,17 @@ class _FakeReductionBroadcastComm:
             raise RuntimeError("No scalar reduction values remain in fake communicator.")
         return self._reduced_scalars.pop(0)
 
+    def reduce(self, value, root: int = 0):
+        if not isinstance(value, np.ndarray):
+            raise TypeError("Fake communicator only implements array reduce for this test.")
+        if not self._reduced_arrays:
+            raise RuntimeError("No array reduction values remain in fake communicator.")
+        return None if self._rank != root else self._reduced_arrays.pop(0).copy()
+
     def Allreduce(self, sendbuf, recvbuf, op=None):
         if not self._reduced_arrays:
             raise RuntimeError("No array reduction values remain in fake communicator.")
         recvbuf[...] = self._reduced_arrays.pop(0)
-
-    def reduce(self, value, root: int = 0):
-        _ = value
-        if not self._reduced_arrays:
-            raise RuntimeError("No array reduction values remain in fake communicator.")
-        reduced = self._reduced_arrays.pop(0).copy()
-        return reduced if self._rank == root else None
 
     def bcast(self, value, root: int = 0):
         return self._broadcast_value.copy()

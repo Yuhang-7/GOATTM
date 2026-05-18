@@ -94,7 +94,7 @@ class DecoderNormalEquationSystem:
     @property
     def regularized_global_normal_matrix(self) -> np.ndarray:
         if self.global_normal_matrix is None:
-            raise RuntimeError("global normal matrix is only materialized on the solve root.")
+            raise RuntimeError("Global normal matrix is only materialized on the solve root.")
         return self.global_normal_matrix + np.diag(self.regularization_diagonal)
 
 
@@ -202,14 +202,12 @@ def solve_decoder_normal_equation(
 
     global_normal_matrix = context.reduce_array_sum_to_root(system.local_normal_matrix, root=solve_root)
     global_rhs = context.reduce_array_sum_to_root(system.local_rhs, root=solve_root)
-    local_solution = np.zeros((system.feature_dimension, system.output_dimension), dtype=np.float64)
+    local_solution = np.zeros_like(system.local_rhs, dtype=np.float64)
     if context.rank == solve_root:
         if global_normal_matrix is None or global_rhs is None:
-            raise RuntimeError("decoder normal equation reduction did not materialize on solve root.")
-        local_solution = np.linalg.solve(
-            global_normal_matrix + np.diag(system.regularization_diagonal),
-            global_rhs,
-        )
+            raise RuntimeError("Root rank did not receive reduced decoder normal equation terms.")
+        regularized_normal_matrix = global_normal_matrix + np.diag(system.regularization_diagonal)
+        local_solution = np.linalg.solve(regularized_normal_matrix, global_rhs)
     solution_matrix = context.bcast_array(local_solution, root=solve_root)
     decoder = _decoder_from_solution_matrix(
         latent_dimension=system.latent_dimension,

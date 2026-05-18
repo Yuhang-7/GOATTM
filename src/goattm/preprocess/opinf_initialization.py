@@ -555,7 +555,7 @@ def _fit_stabilized_dynamics_from_latent_dataset(
     theta = np.zeros(feature_dim, dtype=np.float64)
     if context.rank == 0:
         if global_normal is None or global_rhs is None:
-            raise RuntimeError("OpInf normal equation reduction did not materialize on solve root.")
+            raise RuntimeError("Root rank did not receive reduced stabilized OpInf normal equation terms.")
         theta = np.linalg.solve(global_normal + np.diag(diagonal), global_rhs)
     theta = context.bcast_array(theta, root=0)
     _write_opinf_debug(
@@ -618,25 +618,29 @@ def _fit_linear_dynamics_from_latent_dataset(
     global_rhs = context.reduce_array_sum_to_root(local_rhs, root=0)
     global_target_sumsq = context.allreduce_scalar_sum(local_target_sumsq)
     input_dim = _infer_input_dimension(manifest)
-    feature_dim = rank * rank + rank * input_dim + rank
-    diagonal = np.zeros(feature_dim, dtype=np.float64)
-    diagonal[: rank * rank] = regularization.coeff_w
-    offset = rank * rank
-    diagonal[offset : offset + rank * input_dim] = regularization.coeff_b
-    diagonal[offset + rank * input_dim :] = regularization.coeff_c
-    theta = np.zeros(feature_dim, dtype=np.float64)
+    block_dim = rank + input_dim + 1
+    diagonal = np.zeros(block_dim, dtype=np.float64)
+    diagonal[:rank] = regularization.coeff_w
+    if input_dim > 0:
+        diagonal[rank : rank + input_dim] = regularization.coeff_b
+    diagonal[-1] = regularization.coeff_c
+
+    # ABc regression decouples by output component:
+    # du_i = A[i, :] u + B[i, :] p + c[i]. All components share
+    # the same feature covariance, so solve one small system with r RHSs.
+    theta = np.zeros((block_dim, rank), dtype=np.float64)
     if context.rank == 0:
         if global_normal is None or global_rhs is None:
-            raise RuntimeError("OpInf normal equation reduction did not materialize on solve root.")
-        theta = np.linalg.solve(global_normal + np.diag(diagonal), global_rhs)
+            raise RuntimeError("Root rank did not receive reduced linear OpInf normal equation terms.")
+        regularized_normal = global_normal + np.diag(diagonal)
+        theta = np.linalg.solve(regularized_normal, global_rhs)
     theta = context.bcast_array(theta, root=0)
-    a = theta[: rank * rank].reshape((rank, rank)).copy()
-    offset = rank * rank
+    a = theta[:rank, :].T.copy()
     if input_dim > 0:
-        b = theta[offset : offset + rank * input_dim].reshape((rank, input_dim)).copy()
+        b = theta[rank : rank + input_dim, :].T.copy()
     else:
         b = None
-    c = theta[offset + rank * input_dim :].copy()
+    c = theta[-1, :].copy()
     dynamics = LinearDynamics(a=a, b=b, c=c)
     residual_sumsq = _compute_dynamics_fit_residual_sumsq(manifest, dynamics, context=context)
     relative_residual = 0.0 if global_target_sumsq <= 0.0 else np.sqrt(residual_sumsq / global_target_sumsq)
@@ -647,7 +651,9 @@ def _fit_linear_dynamics_from_latent_dataset(
         attempt=attempt,
         elapsed_seconds=time.perf_counter() - fit_start,
         regression_step_count=global_step_count,
-        feature_dimension=feature_dim,
+        feature_dimension=block_dim,
+        flattened_feature_dimension=rank * rank + rank * input_dim + rank,
+        solve_rhs_count=rank,
         relative_residual=float(relative_residual),
     )
     return dynamics, float(relative_residual)
@@ -659,9 +665,9 @@ def _assemble_linear_dynamics_fit_system(
     context: DistributedContext,
 ) -> tuple[np.ndarray, np.ndarray, float, int]:
     input_dim = _infer_input_dimension(manifest)
-    feature_dim = rank * rank + rank * input_dim + rank
-    local_normal = np.zeros((feature_dim, feature_dim), dtype=np.float64)
-    local_rhs = np.zeros(feature_dim, dtype=np.float64)
+    block_dim = rank + input_dim + 1
+    local_normal = np.zeros((block_dim, block_dim), dtype=np.float64)
+    local_rhs = np.zeros((block_dim, rank), dtype=np.float64)
     local_target_sumsq = 0.0
     local_step_count = 0
 
@@ -670,19 +676,16 @@ def _assemble_linear_dynamics_fit_system(
         latent_trajectory = _reconstruct_latent_trajectory_from_sample(sample, rank=rank)
         u_mid, du, p_mid = _midpoint_regression_arrays(sample, latent_trajectory)
         for step_idx in range(u_mid.shape[0]):
-            u = u_mid[step_idx]
-            p = None if p_mid is None else p_mid[step_idx]
-            for output_idx in range(rank):
-                row = np.zeros(feature_dim, dtype=np.float64)
-                a_offset = output_idx * rank
-                row[a_offset : a_offset + rank] = u
-                b_offset = rank * rank + output_idx * input_dim
-                if input_dim > 0 and p is not None:
-                    row[b_offset : b_offset + input_dim] = p
-                c_offset = rank * rank + rank * input_dim + output_idx
-                row[c_offset] = 1.0
-                local_normal += np.outer(row, row)
-                local_rhs += row * du[step_idx, output_idx]
+            features = np.empty(block_dim, dtype=np.float64)
+            features[:rank] = u_mid[step_idx]
+            if input_dim > 0:
+                if p_mid is None:
+                    features[rank : rank + input_dim] = 0.0
+                else:
+                    features[rank : rank + input_dim] = p_mid[step_idx]
+            features[-1] = 1.0
+            local_normal += np.outer(features, features)
+            local_rhs += np.outer(features, du[step_idx])
         local_target_sumsq += float(np.sum(du * du))
         local_step_count += int(u_mid.shape[0])
     return local_normal, local_rhs, local_target_sumsq, local_step_count
