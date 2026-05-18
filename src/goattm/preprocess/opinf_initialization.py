@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
+import shutil
 import time
 
 import numpy as np
@@ -35,6 +37,7 @@ from .normalization import DatasetNormalizationStats, NormalizedDatasetArtifacts
 
 
 _DYNAMICS_ASSEMBLY_CHUNK_SIZE = 64
+_DEFAULT_AHBC_DENSE_MEMORY_LIMIT_GIB = 64.0
 
 
 @dataclass(frozen=True)
@@ -78,6 +81,7 @@ class OpInfInitializationResult:
     validation_attempt_count: int
     validation_log_path: Path
     summary_path: Path
+    materialized_sample_dirs: tuple[Path, ...]
 
     def as_preprocess_record(self) -> dict[str, object]:
         return {
@@ -100,7 +104,47 @@ class OpInfInitializationResult:
             "validation_attempt_count": int(self.validation_attempt_count),
             "validation_log_path": str(self.validation_log_path),
             "summary_path": str(self.summary_path),
+            "materialized_sample_dirs": [str(path) for path in self.materialized_sample_dirs],
         }
+
+    def cleanup_materialized_sample_data(
+        self,
+        context: DistributedContext | None = None,
+        write_markers: bool = True,
+    ) -> dict[str, object] | None:
+        """Remove duplicated per-sample OpInf caches after training has finished."""
+        context = DistributedContext.from_comm() if context is None else context
+        record: dict[str, object] | None = None
+        if context.rank == 0:
+            deleted: list[dict[str, object]] = []
+            for path in self.materialized_sample_dirs:
+                path = Path(path)
+                if not path.exists():
+                    continue
+                size_bytes, file_count = _directory_size_and_file_count(path)
+                shutil.rmtree(path)
+                if write_markers:
+                    marker_path = path.parent / f"{path.name}.PURGED.txt"
+                    marker_path.write_text(
+                        "Removed duplicated materialized OpInf sample cache after training.\n"
+                        f"Removed path: {path}\n"
+                        f"Approximate removed size: {size_bytes} bytes across {file_count} files.\n",
+                        encoding="utf-8",
+                    )
+                deleted.append(
+                    {
+                        "path": str(path),
+                        "size_bytes": int(size_bytes),
+                        "file_count": int(file_count),
+                    }
+                )
+            record = {
+                "deleted": deleted,
+                "deleted_size_bytes": int(sum(item["size_bytes"] for item in deleted)),
+                "deleted_file_count": int(sum(item["file_count"] for item in deleted)),
+            }
+        context.barrier()
+        return record
 
 
 def initialize_reduced_model_via_opinf(
@@ -121,6 +165,7 @@ def initialize_reduced_model_via_opinf(
     regularization_growth: float = 10.0,
     dynamic_form: str = "AHBc",
     decoder_form: str = "V1V2v",
+    dense_memory_limit_gib: float | None = None,
 ) -> OpInfInitializationResult:
     context = DistributedContext.from_comm() if context is None else context
     regularization = OpInfInitializationRegularization() if regularization is None else regularization
@@ -130,6 +175,14 @@ def initialize_reduced_model_via_opinf(
         raise ValueError(f"dynamic_form must be 'ABc' or 'AHBc', got {dynamic_form!r}")
     if decoder_form not in {"V1v", "V1V2v"}:
         raise ValueError(f"decoder_form must be 'V1v' or 'V1V2v', got {decoder_form!r}")
+    if dynamic_form == "AHBc":
+        guard_manifest = load_npz_sample_manifest(train_manifest) if isinstance(train_manifest, (str, Path)) else train_manifest
+        _guard_stabilized_opinf_dense_memory(
+            rank=rank,
+            input_dim=_infer_input_dimension(guard_manifest),
+            dense_memory_limit_gib=dense_memory_limit_gib,
+            context=context,
+        )
     _ = decoder_regularization
     if max_regularization_retries < 0:
         raise ValueError(f"max_regularization_retries must be nonnegative, got {max_regularization_retries}")
@@ -354,7 +407,88 @@ def initialize_reduced_model_via_opinf(
         validation_attempt_count=len(validation_records),
         validation_log_path=validation_log_path,
         summary_path=summary_path,
+        materialized_sample_dirs=_materialized_sample_dirs(normalized_artifacts, latent_dir),
     )
+
+
+def _materialized_sample_dirs(normalized_artifacts: NormalizedDatasetArtifacts, latent_dir: Path) -> tuple[Path, ...]:
+    dirs: list[Path] = []
+    normalized_samples_dir = normalized_artifacts.output_dir / "samples"
+    if normalized_samples_dir.exists():
+        dirs.append(normalized_samples_dir)
+    dirs.append(latent_dir)
+    return tuple(dirs)
+
+
+def _directory_size_and_file_count(path: Path) -> tuple[int, int]:
+    total = 0
+    count = 0
+    for root, _, filenames in os.walk(path):
+        for filename in filenames:
+            file_path = Path(root) / filename
+            try:
+                total += file_path.stat().st_size
+                count += 1
+            except OSError:
+                continue
+    return total, count
+
+
+def _guard_stabilized_opinf_dense_memory(
+    rank: int,
+    input_dim: int,
+    dense_memory_limit_gib: float | None,
+    context: DistributedContext,
+) -> None:
+    limit_gib = _resolve_dense_memory_limit_gib(dense_memory_limit_gib)
+    if limit_gib <= 0.0:
+        return
+    estimate = _estimate_stabilized_opinf_dense_memory(rank=rank, input_dim=input_dim)
+    estimated_gib = estimate["estimated_peak_bytes_per_rank"] / 1024.0**3
+    if context.rank == 0:
+        print(
+            "[opinf] dense_memory_estimate "
+            f"rank={rank} input_dim={input_dim} estimated_peak_gib={estimated_gib:.3g} limit_gib={limit_gib:.3g}",
+            flush=True,
+        )
+    if estimated_gib > limit_gib:
+        raise MemoryError(
+            "AHBc OpInf initialization would allocate dense per-rank work arrays of roughly "
+            f"{estimated_gib:.1f} GiB for rank={rank}, input_dim={input_dim}. "
+            f"The configured limit is {limit_gib:.1f} GiB. Use dynamic_form='ABc', lower rank/input dimension, "
+            "or set GOATTM_OPINF_DENSE_MEMORY_LIMIT_GIB=0 to bypass this guard."
+        )
+
+
+def _resolve_dense_memory_limit_gib(value: float | None) -> float:
+    if value is not None:
+        return float(value)
+    env_value = os.environ.get("GOATTM_OPINF_DENSE_MEMORY_LIMIT_GIB")
+    if env_value is None or not env_value.strip():
+        return _DEFAULT_AHBC_DENSE_MEMORY_LIMIT_GIB
+    return float(env_value)
+
+
+def _estimate_stabilized_opinf_dense_memory(rank: int, input_dim: int) -> dict[str, int]:
+    zeta_dim = compressed_quadratic_dimension(rank)
+    nw = skew_symmetric_dimension(rank)
+    nh = mu_h_dimension(rank)
+    feature_dim = nw + nh + rank * input_dim + rank
+    h_basis_tensor_bytes = rank * zeta_dim * nh * 8
+    w_basis_bytes = rank * rank * nw * 8
+    normal_bytes = feature_dim * feature_dim * 8
+    rhs_bytes = feature_dim * 8
+    phi_bytes = _DYNAMICS_ASSEMBLY_CHUNK_SIZE * rank * feature_dim * 8
+    estimated_peak = h_basis_tensor_bytes + w_basis_bytes + normal_bytes + rhs_bytes + phi_bytes
+    return {
+        "feature_dim": int(feature_dim),
+        "h_basis_tensor_bytes": int(h_basis_tensor_bytes),
+        "w_basis_bytes": int(w_basis_bytes),
+        "local_normal_bytes": int(normal_bytes),
+        "local_rhs_bytes": int(rhs_bytes),
+        "phi_chunk_bytes": int(phi_bytes),
+        "estimated_peak_bytes_per_rank": int(estimated_peak),
+    }
 
 
 def _write_opinf_debug(

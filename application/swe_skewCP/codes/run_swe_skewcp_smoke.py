@@ -442,6 +442,7 @@ def run(config: SweSkewCPSmokeConfig) -> dict[str, object] | None:
         max_iter_newton=40,
     )
     result = trainer.train(initial_dynamics)
+    cleanup_record = opinf_result.cleanup_materialized_sample_data(context=context)
     if context.rank != 0:
         return None
 
@@ -469,6 +470,7 @@ def run(config: SweSkewCPSmokeConfig) -> dict[str, object] | None:
         "loss_history_csv_path": str(loss_csv_path),
         "loss_history_markdown_path": str(loss_md_path),
         "best_checkpoint_path": str(result.best_checkpoint_path),
+        "opinf_materialized_sample_cleanup": cleanup_record,
     }
     summary_path = run_root / "summary.json"
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
