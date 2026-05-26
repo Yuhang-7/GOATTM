@@ -113,6 +113,9 @@ class ReducedQoiTrainerConfig:
     test_every: int = 1
     keep_iteration_checkpoints: bool = True
     solve_root: int = 0
+    batch_size: int | None = None
+    batch_seed: int = 0
+    batch_shuffle: bool = True
     adam: AdamUpdaterConfig = field(default_factory=AdamUpdaterConfig)
     gradient_descent: GradientDescentUpdaterConfig = field(default_factory=GradientDescentUpdaterConfig)
     lbfgs: LbfgsUpdaterConfig = field(default_factory=LbfgsUpdaterConfig)
@@ -210,6 +213,51 @@ def _relative_error_from_dataset_result(
     if target_sumsq <= 0.0:
         return 0.0 if residual_sumsq <= 0.0 else float("inf")
     return float(np.sqrt(residual_sumsq / target_sumsq))
+
+
+class MiniBatchSampler:
+    def __init__(
+        self,
+        manifest: NpzSampleManifest,
+        batch_size: int | None,
+        seed: int = 0,
+        shuffle: bool = True,
+    ) -> None:
+        self.manifest = manifest
+        self.batch_size = None if batch_size is None else int(batch_size)
+        self.seed = int(seed)
+        self.shuffle = bool(shuffle)
+        self.rng = np.random.default_rng(self.seed)
+        self.epoch = 0
+        self.position = 0
+        self.indices = np.arange(len(manifest), dtype=int)
+        if self.batch_size is not None:
+            if self.batch_size <= 0:
+                raise ValueError(f"batch_size must be positive when provided, got {self.batch_size}")
+            if len(manifest) <= 0:
+                raise ValueError("Cannot sample mini-batches from an empty manifest.")
+        self._reset_epoch()
+
+    @property
+    def enabled(self) -> bool:
+        return self.batch_size is not None and self.batch_size < len(self.manifest)
+
+    def _reset_epoch(self) -> None:
+        self.indices = np.arange(len(self.manifest), dtype=int)
+        if self.shuffle:
+            self.rng.shuffle(self.indices)
+        self.position = 0
+        self.epoch += 1
+
+    def next_manifest(self) -> NpzSampleManifest:
+        if self.batch_size is None or self.batch_size >= len(self.manifest):
+            return self.manifest
+        if self.position >= len(self.indices):
+            self._reset_epoch()
+        end = min(self.position + self.batch_size, len(self.indices))
+        selected = self.indices[self.position : end]
+        self.position = end
+        return self.manifest.subset_by_indices(selected)
 
 
 @dataclass
@@ -480,6 +528,11 @@ class ReducedQoiTrainingLogger:
             "test_every": config.test_every,
             "keep_iteration_checkpoints": config.keep_iteration_checkpoints,
             "solve_root": config.solve_root,
+            "batch_sampler": {
+                "batch_size": config.batch_size,
+                "batch_seed": config.batch_seed,
+                "batch_shuffle": config.batch_shuffle,
+            },
             "adam": {
                 "learning_rate": config.adam.learning_rate,
                 "beta1": config.adam.beta1,
@@ -633,6 +686,8 @@ class ReducedQoiTrainingLogger:
             "test_relative_error": None if snapshot.test_relative_error is None else float(snapshot.test_relative_error),
             "gradient_norm": float(snapshot.gradient_norm),
             "step_norm": float(snapshot.step_norm),
+            "train_batch_global_sample_count": int(snapshot.train_result.dataset_result.global_sample_count),
+            "train_batch_local_sample_count": int(snapshot.train_result.dataset_result.local_sample_count),
             "dynamic_parameter_norm": float(snapshot.dynamic_parameter_norm),
             "decoder_parameter_norm": float(snapshot.decoder_parameter_norm),
             "direct_dynamics_gradient_norm": float(np.linalg.norm(snapshot.train_result.direct_dynamics_gradient)),
@@ -719,6 +774,7 @@ class ReducedQoiTrainingLogger:
             f"dynamics_reg={snapshot.train_result.dynamics_regularization_loss:.6e} "
             f"grad={snapshot.gradient_norm:.6e} "
             f"step={snapshot.step_norm:.6e} "
+            f"train_n={snapshot.train_result.dataset_result.global_sample_count} "
             f"|A|={component_norms['a_fro_norm']:.3e} "
             f"lam_max_symA={component_norms['a_symmetric_part_max_eigenvalue']:.3e} "
             f"max_Re_lamA={component_norms['a_max_real_eigenvalue']:.3e} "
@@ -847,6 +903,8 @@ class ReducedQoiTrainer:
         )
         self.train_dataset_evaluator = ReducedQoiDatasetEvaluator(self.train_evaluator)
         self.test_dataset_evaluator = None if self.test_evaluator is None else ReducedQoiDatasetEvaluator(self.test_evaluator)
+        if config.batch_size is not None and config.optimizer != "joint_adam":
+            raise ValueError("--batch-size is only supported for optimizer='joint_adam'.")
         if config.optimizer in {"adam", "joint_adam"}:
             self.updater = AdamUpdater(config.adam)
         elif config.optimizer == "gradient_descent":
@@ -1377,17 +1435,33 @@ class ReducedQoiTrainer:
         decoder = self._decoder_from_parameter_matrix(decoder_template, decoder_matrix)
         return dynamics, decoder
 
+    def _make_train_evaluator(self, manifest: NpzSampleManifest) -> ObservationAlignedBestResponseEvaluator:
+        return ObservationAlignedBestResponseEvaluator(
+            manifest=manifest,
+            max_dt=self.max_dt,
+            context=self.context,
+            time_integrator=self.time_integrator,
+            dt_shrink=self.dt_shrink,
+            dt_min=self.dt_min,
+            tol=self.tol,
+            max_iter=self.max_iter_newton,
+        )
+
     @timed("goattm.train.ReducedQoiTrainer.evaluate_joint_objective_and_gradient")
     def _evaluate_joint_objective_and_gradient(
         self,
         dynamics: DynamicsLike,
         decoder: QuadraticDecoder,
+        train_evaluator: ObservationAlignedBestResponseEvaluator | None = None,
+        data_scale: float = 1.0,
     ) -> ReducedQoiBestResponseResult:
-        dataset_result = self.train_evaluator.evaluate_dataset_loss_and_gradients(dynamics, decoder)
-        direct_dynamics_gradient = pack_dynamics_gradient_vector(dynamics, dataset_result.dynamics_gradients)
+        evaluator = self.train_evaluator if train_evaluator is None else train_evaluator
+        dataset_result = evaluator.evaluate_dataset_loss_and_gradients(dynamics, decoder)
+        scale = float(data_scale)
+        direct_dynamics_gradient = scale * pack_dynamics_gradient_vector(dynamics, dataset_result.dynamics_gradients)
         dynamics_reg_gradient = dynamics_regularization_gradient_vector(dynamics, self.dynamics_regularization)
         dynamics_gradient = direct_dynamics_gradient + dynamics_reg_gradient
-        decoder_data_gradient = stack_decoder_gradient_matrix(dataset_result.decoder_gradients, decoder.form)
+        decoder_data_gradient = scale * stack_decoder_gradient_matrix(dataset_result.decoder_gradients, decoder.form)
         decoder_reg_gradient = self._decoder_regularization_gradient_matrix(decoder, self.regularization)
         decoder_gradient = decoder_data_gradient + decoder_reg_gradient
         joint_data_gradient = np.concatenate(
@@ -1399,7 +1473,7 @@ class ReducedQoiTrainer:
             axis=0,
         )
         return ReducedQoiBestResponseResult(
-            data_loss=dataset_result.total_loss,
+            data_loss=scale * dataset_result.total_loss,
             decoder_regularization_loss=decoder_regularization_loss(decoder, self.regularization),
             dynamics_regularization_loss=dynamics_regularization_loss(dynamics, self.dynamics_regularization),
             reduced_data_gradient=joint_data_gradient,
@@ -1420,13 +1494,31 @@ class ReducedQoiTrainer:
         max_iterations: int,
     ) -> tuple[ReducedQoiTrainingSnapshot, ReducedQoiTrainingSnapshot]:
         updater = AdamUpdater(self.config.adam)
+        batch_sampler = MiniBatchSampler(
+            self.train_evaluator.manifest,
+            batch_size=self.config.batch_size,
+            seed=self.config.batch_seed,
+            shuffle=self.config.batch_shuffle,
+        )
         current_dynamics = initial_dynamics
         current_decoder = initial_decoder
         best_snapshot: ReducedQoiTrainingSnapshot | None = None
         final_snapshot: ReducedQoiTrainingSnapshot | None = None
 
+        full_train_count = len(self.train_evaluator.manifest)
         for iteration in range(max_iterations + 1):
-            train_result = self._evaluate_joint_objective_and_gradient(current_dynamics, current_decoder)
+            batch_manifest = batch_sampler.next_manifest()
+            if batch_manifest is self.train_evaluator.manifest:
+                train_evaluator = self.train_evaluator
+            else:
+                train_evaluator = self._make_train_evaluator(batch_manifest)
+            data_scale = full_train_count / len(batch_manifest)
+            train_result = self._evaluate_joint_objective_and_gradient(
+                current_dynamics,
+                current_decoder,
+                train_evaluator=train_evaluator,
+                data_scale=data_scale,
+            )
             snapshot = self._evaluate_snapshot(
                 iteration=iteration,
                 dynamics=current_dynamics,

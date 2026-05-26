@@ -83,6 +83,9 @@ class DemoConfig:
     adam_beta2: float
     adam_epsilon: float
     adam_gradient_clip_norm: float | None
+    batch_size: int | None
+    batch_seed: int
+    batch_shuffle: bool
     lbfgs_maxcor: int
     lbfgs_ftol: float
     lbfgs_gtol: float
@@ -164,6 +167,18 @@ def parse_args() -> DemoConfig:
     parser.add_argument("--adam-beta2", type=float, default=0.999, help="Adam beta2.")
     parser.add_argument("--adam-epsilon", type=float, default=1e-8, help="Adam epsilon.")
     parser.add_argument("--adam-gradient-clip-norm", type=float, default=None, help="Optional Adam gradient clip norm.")
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Mini-batch size for joint_adam. Omit for full-batch Adam.",
+    )
+    parser.add_argument("--batch-seed", type=int, default=20260526, help="Mini-batch sampler RNG seed.")
+    parser.add_argument(
+        "--no-batch-shuffle",
+        action="store_true",
+        help="Disable mini-batch shuffling and iterate through train samples in manifest order.",
+    )
     parser.add_argument("--lbfgs-maxcor", type=int, default=20, help="L-BFGS memory size.")
     parser.add_argument("--lbfgs-ftol", type=float, default=1e-12, help="L-BFGS ftol.")
     parser.add_argument("--lbfgs-gtol", type=float, default=1e-8, help="L-BFGS gtol.")
@@ -225,6 +240,9 @@ def parse_args() -> DemoConfig:
         adam_beta2=args.adam_beta2,
         adam_epsilon=args.adam_epsilon,
         adam_gradient_clip_norm=args.adam_gradient_clip_norm,
+        batch_size=args.batch_size,
+        batch_seed=args.batch_seed,
+        batch_shuffle=not args.no_batch_shuffle,
         lbfgs_maxcor=args.lbfgs_maxcor,
         lbfgs_ftol=args.lbfgs_ftol,
         lbfgs_gtol=args.lbfgs_gtol,
@@ -279,6 +297,13 @@ def validate_config(config: DemoConfig) -> None:
         raise ValueError(f"adam_epsilon must be positive, got {config.adam_epsilon}")
     if config.adam_gradient_clip_norm is not None and config.adam_gradient_clip_norm <= 0.0:
         raise ValueError(f"adam_gradient_clip_norm must be positive, got {config.adam_gradient_clip_norm}")
+    if config.batch_size is not None:
+        if config.optimizer != "joint_adam":
+            raise ValueError("--batch-size is only supported with --optimizer joint_adam.")
+        if config.batch_size <= 0:
+            raise ValueError(f"batch_size must be positive when provided, got {config.batch_size}")
+        if config.batch_size > config.ntrain:
+            raise ValueError(f"batch_size={config.batch_size} exceeds ntrain={config.ntrain}")
     if config.adam_bfgs_adam_iterations < 0:
         raise ValueError(
             f"adam_bfgs_adam_iterations must be nonnegative, got {config.adam_bfgs_adam_iterations}"
@@ -656,6 +681,9 @@ def run_demo(config: DemoConfig) -> dict[str, object] | None:
         run_name_prefix=f"goattm_demo_{config.optimizer}_{'oldgoam_' if config.oldgoam_mode else ''}{config.dynamic_form}_{config.decoder_form}_r{config.latent_rank}_ntrain{config.ntrain}_ntest{config.ntest}",
         optimizer=config.optimizer,
         max_iterations=config.max_iterations,
+        batch_size=config.batch_size,
+        batch_seed=config.batch_seed,
+        batch_shuffle=config.batch_shuffle,
         checkpoint_every=10,
         log_every=1,
         test_every=1,
@@ -740,6 +768,11 @@ def run_demo(config: DemoConfig) -> dict[str, object] | None:
             "beta2": config.adam_beta2,
             "epsilon": config.adam_epsilon,
             "gradient_clip_norm": config.adam_gradient_clip_norm,
+        },
+        "batch_sampler": {
+            "batch_size": config.batch_size,
+            "batch_seed": config.batch_seed,
+            "batch_shuffle": config.batch_shuffle,
         },
         "lbfgs": {
             "maxcor": config.lbfgs_maxcor,
