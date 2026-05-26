@@ -83,6 +83,9 @@ class DemoConfig:
     adam_beta2: float
     adam_epsilon: float
     adam_gradient_clip_norm: float | None
+    adam_learning_rate_schedule: str
+    adam_warmup_iterations: int
+    adam_min_learning_rate_factor: float
     batch_size: int | None
     batch_seed: int
     batch_shuffle: bool
@@ -168,6 +171,19 @@ def parse_args() -> DemoConfig:
     parser.add_argument("--adam-epsilon", type=float, default=1e-8, help="Adam epsilon.")
     parser.add_argument("--adam-gradient-clip-norm", type=float, default=None, help="Optional Adam gradient clip norm.")
     parser.add_argument(
+        "--adam-learning-rate-schedule",
+        default="constant",
+        choices=("constant", "warmup_cosine"),
+        help="Adam learning-rate schedule.",
+    )
+    parser.add_argument("--adam-warmup-iterations", type=int, default=0, help="Adam warm-up update count.")
+    parser.add_argument(
+        "--adam-min-learning-rate-factor",
+        type=float,
+        default=1.0,
+        help="Minimum Adam learning rate as a factor of --adam-learning-rate.",
+    )
+    parser.add_argument(
         "--batch-size",
         type=int,
         default=None,
@@ -240,6 +256,9 @@ def parse_args() -> DemoConfig:
         adam_beta2=args.adam_beta2,
         adam_epsilon=args.adam_epsilon,
         adam_gradient_clip_norm=args.adam_gradient_clip_norm,
+        adam_learning_rate_schedule=args.adam_learning_rate_schedule,
+        adam_warmup_iterations=args.adam_warmup_iterations,
+        adam_min_learning_rate_factor=args.adam_min_learning_rate_factor,
         batch_size=args.batch_size,
         batch_seed=args.batch_seed,
         batch_shuffle=not args.no_batch_shuffle,
@@ -297,6 +316,12 @@ def validate_config(config: DemoConfig) -> None:
         raise ValueError(f"adam_epsilon must be positive, got {config.adam_epsilon}")
     if config.adam_gradient_clip_norm is not None and config.adam_gradient_clip_norm <= 0.0:
         raise ValueError(f"adam_gradient_clip_norm must be positive, got {config.adam_gradient_clip_norm}")
+    if config.adam_warmup_iterations < 0:
+        raise ValueError(f"adam_warmup_iterations must be nonnegative, got {config.adam_warmup_iterations}")
+    if config.adam_min_learning_rate_factor < 0.0:
+        raise ValueError(
+            f"adam_min_learning_rate_factor must be nonnegative, got {config.adam_min_learning_rate_factor}"
+        )
     if config.batch_size is not None:
         if config.optimizer != "joint_adam":
             raise ValueError("--batch-size is only supported with --optimizer joint_adam.")
@@ -693,6 +718,9 @@ def run_demo(config: DemoConfig) -> dict[str, object] | None:
             beta2=config.adam_beta2,
             epsilon=config.adam_epsilon,
             gradient_clip_norm=config.adam_gradient_clip_norm,
+            learning_rate_schedule=config.adam_learning_rate_schedule,
+            warmup_iterations=config.adam_warmup_iterations,
+            min_learning_rate_factor=config.adam_min_learning_rate_factor,
         ),
         lbfgs=LbfgsUpdaterConfig(
             maxcor=config.lbfgs_maxcor,
@@ -768,6 +796,9 @@ def run_demo(config: DemoConfig) -> dict[str, object] | None:
             "beta2": config.adam_beta2,
             "epsilon": config.adam_epsilon,
             "gradient_clip_norm": config.adam_gradient_clip_norm,
+            "learning_rate_schedule": config.adam_learning_rate_schedule,
+            "warmup_iterations": config.adam_warmup_iterations,
+            "min_learning_rate_factor": config.adam_min_learning_rate_factor,
         },
         "batch_sampler": {
             "batch_size": config.batch_size,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import sys
 import time
 import traceback
@@ -59,6 +60,9 @@ class AdamUpdaterConfig:
     beta2: float = 0.999
     epsilon: float = 1e-8
     gradient_clip_norm: float | None = None
+    learning_rate_schedule: str = "constant"
+    warmup_iterations: int = 0
+    min_learning_rate_factor: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -137,6 +141,7 @@ class ReducedQoiTrainingSnapshot:
     gradient_norm: float
     dynamic_parameter_norm: float
     decoder_parameter_norm: float
+    learning_rate: float | None = None
 
     @property
     def objective_value(self) -> float:
@@ -266,9 +271,33 @@ class AdamUpdater:
     m: np.ndarray | None = None
     v: np.ndarray | None = None
     t: int = 0
+    last_learning_rate: float | None = None
+
+    def learning_rate_for_update(self, update_index: int, max_updates: int) -> float:
+        base_lr = float(self.config.learning_rate)
+        schedule = self.config.learning_rate_schedule
+        if schedule in {"constant", "none"}:
+            return base_lr
+        if schedule != "warmup_cosine":
+            raise ValueError(f"Unsupported Adam learning_rate_schedule '{schedule}'.")
+
+        warmup_iterations = max(0, int(self.config.warmup_iterations))
+        min_factor = float(self.config.min_learning_rate_factor)
+        if min_factor < 0.0:
+            raise ValueError(f"min_learning_rate_factor must be nonnegative, got {min_factor}")
+        min_lr = base_lr * min_factor
+
+        if warmup_iterations > 0 and update_index < warmup_iterations:
+            return base_lr * float(update_index + 1) / float(warmup_iterations)
+
+        decay_updates = max(1, int(max_updates) - warmup_iterations)
+        progress = float(update_index - warmup_iterations + 1) / float(decay_updates)
+        progress = min(1.0, max(0.0, progress))
+        cosine_weight = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return min_lr + (base_lr - min_lr) * cosine_weight
 
     @timed("goattm.train.AdamUpdater.step")
-    def step(self, parameters: np.ndarray, gradient: np.ndarray) -> tuple[np.ndarray, float]:
+    def step(self, parameters: np.ndarray, gradient: np.ndarray, learning_rate: float | None = None) -> tuple[np.ndarray, float]:
         grad = np.asarray(gradient, dtype=np.float64)
         params = np.asarray(parameters, dtype=np.float64)
         if self.m is None or self.v is None:
@@ -285,7 +314,9 @@ class AdamUpdater:
         self.v = self.config.beta2 * self.v + (1.0 - self.config.beta2) * (grad * grad)
         m_hat = self.m / (1.0 - self.config.beta1**self.t)
         v_hat = self.v / (1.0 - self.config.beta2**self.t)
-        update = -self.config.learning_rate * m_hat / (np.sqrt(v_hat) + self.config.epsilon)
+        active_learning_rate = self.config.learning_rate if learning_rate is None else float(learning_rate)
+        self.last_learning_rate = active_learning_rate
+        update = -active_learning_rate * m_hat / (np.sqrt(v_hat) + self.config.epsilon)
         return params + update, float(np.linalg.norm(update))
 
 
@@ -539,6 +570,9 @@ class ReducedQoiTrainingLogger:
                 "beta2": config.adam.beta2,
                 "epsilon": config.adam.epsilon,
                 "gradient_clip_norm": config.adam.gradient_clip_norm,
+                "learning_rate_schedule": config.adam.learning_rate_schedule,
+                "warmup_iterations": config.adam.warmup_iterations,
+                "min_learning_rate_factor": config.adam.min_learning_rate_factor,
             },
             "gradient_descent": {
                 "learning_rate": config.gradient_descent.learning_rate,
@@ -698,6 +732,8 @@ class ReducedQoiTrainingLogger:
             "best_test_data_loss": None if best_snapshot.test_data_loss is None else float(best_snapshot.test_data_loss),
             "best_test_relative_error": None if best_snapshot.test_relative_error is None else float(best_snapshot.test_relative_error),
         }
+        if snapshot.learning_rate is not None:
+            record["learning_rate"] = float(snapshot.learning_rate)
         record.update(
             {
                 "dynamics_a_fro_norm": component_norms["a_fro_norm"],
@@ -774,6 +810,7 @@ class ReducedQoiTrainingLogger:
             f"dynamics_reg={snapshot.train_result.dynamics_regularization_loss:.6e} "
             f"grad={snapshot.gradient_norm:.6e} "
             f"step={snapshot.step_norm:.6e} "
+            f"lr={'NA' if snapshot.learning_rate is None else f'{snapshot.learning_rate:.3e}'} "
             f"train_n={snapshot.train_result.dataset_result.global_sample_count} "
             f"|A|={component_norms['a_fro_norm']:.3e} "
             f"lam_max_symA={component_norms['a_symmetric_part_max_eigenvalue']:.3e} "
@@ -905,6 +942,17 @@ class ReducedQoiTrainer:
         self.test_dataset_evaluator = None if self.test_evaluator is None else ReducedQoiDatasetEvaluator(self.test_evaluator)
         if config.batch_size is not None and config.optimizer != "joint_adam":
             raise ValueError("--batch-size is only supported for optimizer='joint_adam'.")
+        if config.adam.learning_rate_schedule not in {"constant", "none", "warmup_cosine"}:
+            raise ValueError(
+                "adam.learning_rate_schedule must be one of 'constant', 'none', or 'warmup_cosine', "
+                f"got {config.adam.learning_rate_schedule!r}."
+            )
+        if config.adam.warmup_iterations < 0:
+            raise ValueError(f"adam.warmup_iterations must be nonnegative, got {config.adam.warmup_iterations}.")
+        if config.adam.min_learning_rate_factor < 0.0:
+            raise ValueError(
+                f"adam.min_learning_rate_factor must be nonnegative, got {config.adam.min_learning_rate_factor}."
+            )
         if config.optimizer in {"adam", "joint_adam"}:
             self.updater = AdamUpdater(config.adam)
         elif config.optimizer == "gradient_descent":
@@ -1532,7 +1580,8 @@ class ReducedQoiTrainer:
             if iteration < max_iterations:
                 parameter_vector = self._joint_parameter_vector(current_dynamics, current_decoder)
                 gradient = np.asarray(train_result.reduced_objective_gradient, dtype=np.float64)
-                next_vector, step_norm = updater.step(parameter_vector, gradient)
+                learning_rate = updater.learning_rate_for_update(iteration, max_iterations)
+                next_vector, step_norm = updater.step(parameter_vector, gradient, learning_rate=learning_rate)
                 next_dynamics, next_decoder = self._joint_from_parameter_vector(
                     current_dynamics,
                     current_decoder,
@@ -1550,6 +1599,7 @@ class ReducedQoiTrainer:
                     gradient_norm=snapshot.gradient_norm,
                     dynamic_parameter_norm=snapshot.dynamic_parameter_norm,
                     decoder_parameter_norm=snapshot.decoder_parameter_norm,
+                    learning_rate=learning_rate,
                 )
 
             if best_snapshot is None or self._is_better(snapshot, best_snapshot):
@@ -1591,10 +1641,14 @@ class ReducedQoiTrainer:
 
             step_norm = 0.0
             next_dynamics = current_dynamics
+            learning_rate = None
             if local_iteration < max_iterations:
                 gradient = np.asarray(train_result.reduced_objective_gradient, dtype=np.float64)
                 parameter_vector = dynamics_parameter_vector(current_dynamics)
-                if isinstance(updater, (AdamUpdater, GradientDescentUpdater)):
+                if isinstance(updater, AdamUpdater):
+                    learning_rate = updater.learning_rate_for_update(local_iteration, max_iterations)
+                    next_vector, step_norm = updater.step(parameter_vector, gradient, learning_rate=learning_rate)
+                elif isinstance(updater, GradientDescentUpdater):
                     next_vector, step_norm = updater.step(parameter_vector, gradient)
                 else:
                     prepared_state = ReducedObjectivePreparedState(
@@ -1619,6 +1673,7 @@ class ReducedQoiTrainer:
                     gradient_norm=snapshot.gradient_norm,
                     dynamic_parameter_norm=snapshot.dynamic_parameter_norm,
                     decoder_parameter_norm=snapshot.decoder_parameter_norm,
+                    learning_rate=learning_rate,
                 )
 
             if best_snapshot is None or self._is_better(snapshot, best_snapshot):
