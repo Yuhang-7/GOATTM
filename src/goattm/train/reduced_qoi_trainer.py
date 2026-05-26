@@ -28,9 +28,14 @@ from goattm.problems import (
     ReducedObjectivePreparedState,
     ReducedQoiBestResponseResult,
     decoder_parameter_matrix,
+    decoder_regularization_loss,
     dynamics_from_parameter_vector,
     dynamics_parameter_key,
     dynamics_parameter_vector,
+    dynamics_regularization_gradient_vector,
+    dynamics_regularization_loss,
+    pack_dynamics_gradient_vector,
+    stack_decoder_gradient_matrix,
 )
 from goattm.runtime import DistributedContext, FunctionTimer, timed, use_function_timer
 from goattm.solvers import TimeIntegrator, validate_time_integrator
@@ -842,7 +847,7 @@ class ReducedQoiTrainer:
         )
         self.train_dataset_evaluator = ReducedQoiDatasetEvaluator(self.train_evaluator)
         self.test_dataset_evaluator = None if self.test_evaluator is None else ReducedQoiDatasetEvaluator(self.test_evaluator)
-        if config.optimizer == "adam":
+        if config.optimizer in {"adam", "joint_adam"}:
             self.updater = AdamUpdater(config.adam)
         elif config.optimizer == "gradient_descent":
             self.updater = GradientDescentUpdater(config.gradient_descent)
@@ -852,7 +857,7 @@ class ReducedQoiTrainer:
             self.updater = NewtonActionUpdater(config.newton_action)
         else:
             raise ValueError(
-                f"Unsupported optimizer '{config.optimizer}'. Supported optimizers are 'adam', 'gradient_descent', 'lbfgs', 'bfgs', 'adam_bfgs', and 'newton_action'."
+                f"Unsupported optimizer '{config.optimizer}'. Supported optimizers are 'adam', 'joint_adam', 'gradient_descent', 'lbfgs', 'bfgs', 'adam_bfgs', and 'newton_action'."
             )
         logger = None
         if self.context.rank == 0:
@@ -1315,6 +1320,161 @@ class ReducedQoiTrainer:
                     pass
             raise
 
+    @staticmethod
+    def _decoder_from_parameter_matrix(decoder_template: QuadraticDecoder, matrix: np.ndarray) -> QuadraticDecoder:
+        parameter_matrix = np.asarray(matrix, dtype=np.float64)
+        expected_shape = decoder_parameter_matrix(decoder_template).shape
+        if parameter_matrix.shape != expected_shape:
+            raise ValueError(f"decoder parameter matrix must have shape {expected_shape}, got {parameter_matrix.shape}")
+        latent_dimension = decoder_template.latent_dimension
+        if decoder_template.form == "V1v":
+            v1 = parameter_matrix[:latent_dimension].T.copy()
+            v2 = np.zeros_like(decoder_template.v2, dtype=np.float64)
+            v0 = parameter_matrix[latent_dimension].copy()
+        else:
+            quadratic_dimension = decoder_template.v2.shape[1]
+            v1 = parameter_matrix[:latent_dimension].T.copy()
+            v2 = parameter_matrix[latent_dimension : latent_dimension + quadratic_dimension].T.copy()
+            v0 = parameter_matrix[-1].copy()
+        return QuadraticDecoder(v1=v1, v2=v2, v0=v0, form=decoder_template.form)
+
+    @staticmethod
+    def _decoder_regularization_gradient_matrix(
+        decoder: QuadraticDecoder,
+        regularization: DecoderTikhonovRegularization,
+    ) -> np.ndarray:
+        gradients = {
+            "v1": 2.0 * regularization.coeff_v1 * np.asarray(decoder.v1, dtype=np.float64),
+            "v2": 2.0 * regularization.coeff_v2 * np.asarray(decoder.v2, dtype=np.float64),
+            "v0": 2.0 * regularization.coeff_v0 * np.asarray(decoder.v0, dtype=np.float64),
+        }
+        return stack_decoder_gradient_matrix(gradients, decoder.form)
+
+    @staticmethod
+    def _joint_parameter_vector(dynamics: DynamicsLike, decoder: QuadraticDecoder) -> np.ndarray:
+        return np.concatenate(
+            [
+                dynamics_parameter_vector(dynamics),
+                decoder_parameter_matrix(decoder).reshape(-1),
+            ],
+            axis=0,
+        )
+
+    def _joint_from_parameter_vector(
+        self,
+        dynamics_template: DynamicsLike,
+        decoder_template: QuadraticDecoder,
+        vector: np.ndarray,
+    ) -> tuple[DynamicsLike, QuadraticDecoder]:
+        flat = np.asarray(vector, dtype=np.float64).reshape(-1)
+        dynamics_dim = dynamics_parameter_vector(dynamics_template).shape[0]
+        decoder_shape = decoder_parameter_matrix(decoder_template).shape
+        expected_dim = dynamics_dim + int(np.prod(decoder_shape))
+        if flat.shape[0] != expected_dim:
+            raise ValueError(f"joint parameter vector must have length {expected_dim}, got {flat.shape[0]}")
+        dynamics = dynamics_from_parameter_vector(dynamics_template, flat[:dynamics_dim])
+        decoder_matrix = flat[dynamics_dim:].reshape(decoder_shape)
+        decoder = self._decoder_from_parameter_matrix(decoder_template, decoder_matrix)
+        return dynamics, decoder
+
+    @timed("goattm.train.ReducedQoiTrainer.evaluate_joint_objective_and_gradient")
+    def _evaluate_joint_objective_and_gradient(
+        self,
+        dynamics: DynamicsLike,
+        decoder: QuadraticDecoder,
+    ) -> ReducedQoiBestResponseResult:
+        dataset_result = self.train_evaluator.evaluate_dataset_loss_and_gradients(dynamics, decoder)
+        direct_dynamics_gradient = pack_dynamics_gradient_vector(dynamics, dataset_result.dynamics_gradients)
+        dynamics_reg_gradient = dynamics_regularization_gradient_vector(dynamics, self.dynamics_regularization)
+        dynamics_gradient = direct_dynamics_gradient + dynamics_reg_gradient
+        decoder_data_gradient = stack_decoder_gradient_matrix(dataset_result.decoder_gradients, decoder.form)
+        decoder_reg_gradient = self._decoder_regularization_gradient_matrix(decoder, self.regularization)
+        decoder_gradient = decoder_data_gradient + decoder_reg_gradient
+        joint_data_gradient = np.concatenate(
+            [direct_dynamics_gradient, decoder_data_gradient.reshape(-1)],
+            axis=0,
+        )
+        joint_objective_gradient = np.concatenate(
+            [dynamics_gradient, decoder_gradient.reshape(-1)],
+            axis=0,
+        )
+        return ReducedQoiBestResponseResult(
+            data_loss=dataset_result.total_loss,
+            decoder_regularization_loss=decoder_regularization_loss(decoder, self.regularization),
+            dynamics_regularization_loss=dynamics_regularization_loss(dynamics, self.dynamics_regularization),
+            reduced_data_gradient=joint_data_gradient,
+            reduced_objective_gradient=joint_objective_gradient,
+            direct_dynamics_gradient=direct_dynamics_gradient,
+            dynamics_regularization_gradient=dynamics_reg_gradient,
+            decoder_chain_gradient=np.zeros_like(dynamics_gradient),
+            decoder_data_gradient_matrix=decoder_data_gradient,
+            decoder=decoder,
+            best_response_context=None,  # type: ignore[arg-type]
+            dataset_result=dataset_result,
+        )
+
+    def _train_with_joint_adam(
+        self,
+        initial_dynamics: DynamicsLike,
+        initial_decoder: QuadraticDecoder,
+        max_iterations: int,
+    ) -> tuple[ReducedQoiTrainingSnapshot, ReducedQoiTrainingSnapshot]:
+        updater = AdamUpdater(self.config.adam)
+        current_dynamics = initial_dynamics
+        current_decoder = initial_decoder
+        best_snapshot: ReducedQoiTrainingSnapshot | None = None
+        final_snapshot: ReducedQoiTrainingSnapshot | None = None
+
+        for iteration in range(max_iterations + 1):
+            train_result = self._evaluate_joint_objective_and_gradient(current_dynamics, current_decoder)
+            snapshot = self._evaluate_snapshot(
+                iteration=iteration,
+                dynamics=current_dynamics,
+                step_norm=0.0,
+                train_result=train_result,
+            )
+
+            step_norm = 0.0
+            next_dynamics = current_dynamics
+            next_decoder = current_decoder
+            if iteration < max_iterations:
+                parameter_vector = self._joint_parameter_vector(current_dynamics, current_decoder)
+                gradient = np.asarray(train_result.reduced_objective_gradient, dtype=np.float64)
+                next_vector, step_norm = updater.step(parameter_vector, gradient)
+                next_dynamics, next_decoder = self._joint_from_parameter_vector(
+                    current_dynamics,
+                    current_decoder,
+                    next_vector,
+                )
+                snapshot = ReducedQoiTrainingSnapshot(
+                    iteration=snapshot.iteration,
+                    dynamics=snapshot.dynamics,
+                    decoder=snapshot.decoder,
+                    train_result=snapshot.train_result,
+                    test_data_loss=snapshot.test_data_loss,
+                    train_relative_error=snapshot.train_relative_error,
+                    test_relative_error=snapshot.test_relative_error,
+                    step_norm=step_norm,
+                    gradient_norm=snapshot.gradient_norm,
+                    dynamic_parameter_norm=snapshot.dynamic_parameter_norm,
+                    decoder_parameter_norm=snapshot.decoder_parameter_norm,
+                )
+
+            if best_snapshot is None or self._is_better(snapshot, best_snapshot):
+                best_snapshot = snapshot
+                is_best = True
+            else:
+                is_best = False
+
+            self._record_snapshot(snapshot, best_snapshot, is_best=is_best)
+            final_snapshot = snapshot
+            current_dynamics = next_dynamics
+            current_decoder = next_decoder
+
+        if final_snapshot is None or best_snapshot is None:
+            raise RuntimeError("Joint Adam training loop terminated before producing any snapshot.")
+        return final_snapshot, best_snapshot
+
     def _train_with_step_updater(
         self,
         initial_dynamics: DynamicsLike,
@@ -1397,7 +1557,13 @@ class ReducedQoiTrainer:
                     echo=self.config.echo_progress and self.context.rank == 0,
                 )
                 self.logger.write_initial_parameters(initial_dynamics, self.decoder_template)
-                if self.config.optimizer in {"lbfgs", "bfgs"}:
+                if self.config.optimizer == "joint_adam":
+                    final_snapshot, best_snapshot = self._train_with_joint_adam(
+                        initial_dynamics,
+                        initial_decoder=self.decoder_template,
+                        max_iterations=self.config.max_iterations,
+                    )
+                elif self.config.optimizer in {"lbfgs", "bfgs"}:
                     final_snapshot, best_snapshot = self._train_with_scipy_quasi_newton(
                         initial_dynamics,
                         optimizer=self.config.optimizer,

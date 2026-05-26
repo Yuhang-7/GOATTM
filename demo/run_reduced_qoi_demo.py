@@ -156,7 +156,7 @@ def parse_args() -> DemoConfig:
     parser.add_argument(
         "--optimizer",
         default="bfgs",
-        choices=("lbfgs", "bfgs", "adam_bfgs", "adam", "gradient_descent", "newton_action"),
+        choices=("lbfgs", "bfgs", "adam_bfgs", "adam", "joint_adam", "gradient_descent", "newton_action"),
     )
     parser.add_argument("--max-iterations", type=int, default=50, help="Optimizer max iterations.")
     parser.add_argument("--adam-learning-rate", type=float, default=1e-2, help="Adam learning rate.")
