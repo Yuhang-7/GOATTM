@@ -656,6 +656,9 @@ class ReducedQoiTrainingLogger:
         self,
         snapshot: ReducedQoiTrainingSnapshot,
         best_snapshot: ReducedQoiTrainingSnapshot,
+        log_wall_time: str | None = None,
+        elapsed_since_last_log: float | None = None,
+        solve_counts: dict[str, int] | None = None,
     ) -> None:
         if not self.active:
             return
@@ -680,7 +683,12 @@ class ReducedQoiTrainingLogger:
             "best_train_relative_error": float(best_snapshot.train_relative_error),
             "best_test_data_loss": None if best_snapshot.test_data_loss is None else float(best_snapshot.test_data_loss),
             "best_test_relative_error": None if best_snapshot.test_relative_error is None else float(best_snapshot.test_relative_error),
+            "log_wall_time": log_wall_time,
+            "log_elapsed_seconds": None if elapsed_since_last_log is None else float(elapsed_since_last_log),
         }
+        if solve_counts is not None:
+            for key, value in solve_counts.items():
+                record[f"solve_count_{key}"] = int(value)
         record.update(
             {
                 "dynamics_a_fro_norm": component_norms["a_fro_norm"],
@@ -742,13 +750,21 @@ class ReducedQoiTrainingLogger:
         self,
         snapshot: ReducedQoiTrainingSnapshot,
         best_snapshot: ReducedQoiTrainingSnapshot,
+        log_wall_time: str | None = None,
+        elapsed_since_last_log: float | None = None,
+        solve_counts: dict[str, int] | None = None,
     ) -> str:
         test_piece = "NA" if snapshot.test_data_loss is None else f"{snapshot.test_data_loss:.6e}"
         test_rel_piece = "NA" if snapshot.test_relative_error is None else f"{snapshot.test_relative_error:.6e}"
         best_test_piece = "NA" if best_snapshot.test_data_loss is None else f"{best_snapshot.test_data_loss:.6e}"
         component_norms = _dynamics_component_norms(snapshot.dynamics)
+        wall_time_piece = "NA" if log_wall_time is None else log_wall_time
+        elapsed_piece = "NA" if elapsed_since_last_log is None else f"{elapsed_since_last_log:.2f}s"
+        solve_counts = {} if solve_counts is None else solve_counts
         return (
             f"[iter {snapshot.iteration:04d}] "
+            f"time={wall_time_piece} "
+            f"elapsed={elapsed_piece} "
             f"train_obj={snapshot.objective_value:.6e} "
             f"train_data={snapshot.train_result.data_loss:.6e} "
             f"train_rel={snapshot.train_relative_error:.6e} "
@@ -764,7 +780,11 @@ class ReducedQoiTrainingLogger:
             f"test_rel={test_rel_piece} "
             f"best_iter={best_snapshot.iteration:04d} "
             f"best_obj={best_snapshot.objective_value:.6e} "
-            f"best_test={best_test_piece}"
+            f"best_test={best_test_piece} "
+            f"train_fwd={int(solve_counts.get('train_forward', 0))} "
+            f"train_adj={int(solve_counts.get('train_adjoint', 0))} "
+            f"train_tangent_fwd={int(solve_counts.get('train_tangent_forward', 0))} "
+            f"train_incr_adj={int(solve_counts.get('train_incremental_adjoint', 0))}"
         )
 
     def _write_summary(
@@ -881,6 +901,7 @@ class ReducedQoiTrainer:
         )
         self.train_dataset_evaluator = ReducedQoiDatasetEvaluator(self.train_evaluator)
         self.test_dataset_evaluator = None if self.test_evaluator is None else ReducedQoiDatasetEvaluator(self.test_evaluator)
+        self._last_iteration_log_monotonic: float | None = None
         if config.optimizer == "adam":
             self.updater = AdamUpdater(config.adam)
         elif config.optimizer == "gradient_descent":
@@ -931,6 +952,9 @@ class ReducedQoiTrainer:
             time_integrator=self.time_integrator,
         )
 
+    def _solve_count_record(self) -> dict[str, int]:
+        return {f"train_{key}": value for key, value in self.train_evaluator.solve_count_record().items()}
+
     def _evaluate_snapshot(
         self,
         iteration: int,
@@ -972,9 +996,28 @@ class ReducedQoiTrainer:
         is_best: bool,
     ) -> None:
         if snapshot.iteration % self.config.log_every == 0:
-            self.logger.log_iteration(snapshot, best_snapshot)
+            log_wall_time = datetime.now().isoformat(timespec="seconds")
+            log_monotonic = time.perf_counter()
+            elapsed_since_last_log = None
+            if self._last_iteration_log_monotonic is not None:
+                elapsed_since_last_log = log_monotonic - self._last_iteration_log_monotonic
+            self._last_iteration_log_monotonic = log_monotonic
+            solve_counts = self._solve_count_record()
+            self.logger.log_iteration(
+                snapshot,
+                best_snapshot,
+                log_wall_time=log_wall_time,
+                elapsed_since_last_log=elapsed_since_last_log,
+                solve_counts=solve_counts,
+            )
             self.logger.log_stdout(
-                self.logger.format_iteration_message(snapshot, best_snapshot),
+                self.logger.format_iteration_message(
+                    snapshot,
+                    best_snapshot,
+                    log_wall_time=log_wall_time,
+                    elapsed_since_last_log=elapsed_since_last_log,
+                    solve_counts=solve_counts,
+                ),
                 echo=self.config.echo_progress and self.context.rank == 0,
             )
         if snapshot.iteration % self.config.checkpoint_every == 0 or snapshot.iteration == self.config.max_iterations or is_best:

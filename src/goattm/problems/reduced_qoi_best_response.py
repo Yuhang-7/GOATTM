@@ -347,6 +347,22 @@ class ObservationAlignedBestResponseEvaluator:
         self._best_response_cache: DecoderBestResponseContext | None = None
         self._dataset_eval_cache_key: tuple[str, str] | None = None
         self._dataset_eval_cache: DatasetQoiLossGradientResult | None = None
+        self._solve_counts = {
+            "forward": 0,
+            "adjoint": 0,
+            "tangent_forward": 0,
+            "incremental_adjoint": 0,
+        }
+
+    def increment_solve_count(self, name: str, local_count: int) -> int:
+        if name not in self._solve_counts:
+            raise KeyError(f"Unknown solve counter '{name}'.")
+        global_count = self.context.allreduce_int_sum(int(local_count))
+        self._solve_counts[name] += int(global_count)
+        return int(global_count)
+
+    def solve_count_record(self) -> dict[str, int]:
+        return {key: int(value) for key, value in self._solve_counts.items()}
 
     @timed("goattm.problems.ObservationAlignedBestResponseEvaluator.get_forward_rollouts")
     def get_forward_rollouts(self, dynamics: DynamicsLike) -> ForwardRolloutCacheEntry:
@@ -422,12 +438,13 @@ class ObservationAlignedBestResponseEvaluator:
                 )
             raise RuntimeError("Forward rollout failed on another MPI rank: " + " | ".join(failures))
 
+        global_sample_count = self.increment_solve_count("forward", len(local_rollouts))
         self._forward_cache = ForwardRolloutCacheEntry(
             dynamics_key=dynamics_key,
             local_rollouts=tuple(local_rollouts),
             local_sample_ids=tuple(local_sample_ids),
             local_sample_count=len(local_rollouts),
-            global_sample_count=self.context.allreduce_int_sum(len(local_rollouts)),
+            global_sample_count=global_sample_count,
         )
         self._best_response_cache_key = None
         self._best_response_cache = None
@@ -525,6 +542,7 @@ class ObservationAlignedBestResponseEvaluator:
             for key, value in result.dynamics_gradients.items():
                 dynamics_gradients[key] += value
 
+        self.increment_solve_count("adjoint", len(local_results))
         dataset_result = DatasetQoiLossGradientResult(
             total_loss=self.context.allreduce_scalar_sum(local_loss),
             local_loss=local_loss,
@@ -711,6 +729,7 @@ class ObservationAlignedBestResponseEvaluator:
                     - np.outer(dphi, q_target)
                 )
 
+        self.increment_solve_count("tangent_forward", len(forward_cache.local_rollouts))
         return self.context.allreduce_array_sum(local_action)
 
     @timed("goattm.problems.ObservationAlignedBestResponseEvaluator.compute_decoder_best_response_action")
@@ -1022,6 +1041,9 @@ class ObservationAlignedBestResponseEvaluator:
             if total_b_grad is not None and sample_b_grad is not None:
                 total_b_grad += sample_b_grad
                 total_delta_b_grad += sample_delta_b_grad
+
+        self.increment_solve_count("tangent_forward", len(local_rollouts))
+        self.increment_solve_count("incremental_adjoint", len(local_rollouts))
 
         total_a_grad = self.context.allreduce_array_sum(total_a_grad)
         total_delta_a_grad = self.context.allreduce_array_sum(total_delta_a_grad)

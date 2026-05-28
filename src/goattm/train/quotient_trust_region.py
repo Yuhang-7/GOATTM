@@ -448,6 +448,10 @@ def compute_vp_metric_quadratic(
                 dphi = np.concatenate([state_tangent, np.zeros(1, dtype=np.float64)])
             output_tangent = x_matrix.T @ dphi + decoder_action_matrix.T @ phi
             local_value += float(weight) * float(output_tangent @ output_tangent)
+    workflow.evaluator.increment_solve_count(
+        "tangent_forward",
+        len(prepared_state.result.best_response_context.forward_cache.local_rollouts),
+    )
     return float(workflow.evaluator.context.allreduce_scalar_sum(local_value))
 
 
