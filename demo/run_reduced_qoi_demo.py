@@ -49,6 +49,7 @@ from goattm.train import (  # noqa: E402
     AdamUpdaterConfig,
     BfgsUpdaterConfig,
     LbfgsUpdaterConfig,
+    QuotientTrustRegionConfig,
     ReducedQoiTrainer,
     ReducedQoiTrainerConfig,
 )
@@ -91,6 +92,18 @@ class DemoConfig:
     bfgs_c2: float
     bfgs_xrtol: float
     adam_bfgs_adam_iterations: int
+    qtr_subproblem_solver: str
+    qtr_initial_radius: float
+    qtr_max_radius: float
+    qtr_acceptance_threshold: float
+    qtr_shrink_factor: float
+    qtr_expand_factor: float
+    qtr_metric_ridge: float
+    qtr_hessian_damping: float
+    qtr_max_dense_dimension: int
+    qtr_cg_tolerance: float
+    qtr_cg_max_iterations: int | None
+    qtr_max_backtracks: int
 
     # Regularization setting.
     opinf_reg_w: float
@@ -147,7 +160,7 @@ def parse_args() -> DemoConfig:
     parser.add_argument(
         "--optimizer",
         default="bfgs",
-        choices=("lbfgs", "bfgs", "adam_bfgs", "adam", "gradient_descent", "newton_action"),
+        choices=("lbfgs", "bfgs", "adam_bfgs", "adam", "gradient_descent", "newton_action", "quotient_trust_region"),
     )
     parser.add_argument("--max-iterations", type=int, default=50, help="Optimizer max iterations.")
     parser.add_argument("--adam-learning-rate", type=float, default=1e-2, help="Adam learning rate.")
@@ -169,6 +182,23 @@ def parse_args() -> DemoConfig:
         default=100,
         help="Number of Adam warm-up iterations before switching to BFGS.",
     )
+    parser.add_argument(
+        "--qtr-subproblem-solver",
+        choices=("matrix_free", "dense"),
+        default="matrix_free",
+        help="Quotient trust-region subproblem solver.",
+    )
+    parser.add_argument("--qtr-initial-radius", type=float, default=1.0, help="Initial quotient TR radius.")
+    parser.add_argument("--qtr-max-radius", type=float, default=100.0, help="Maximum quotient TR radius.")
+    parser.add_argument("--qtr-acceptance-threshold", type=float, default=1e-4, help="TR acceptance threshold.")
+    parser.add_argument("--qtr-shrink-factor", type=float, default=0.25, help="TR radius shrink factor.")
+    parser.add_argument("--qtr-expand-factor", type=float, default=2.0, help="TR radius expansion factor.")
+    parser.add_argument("--qtr-metric-ridge", type=float, default=1e-8, help="Ridge added to the VP semi-metric.")
+    parser.add_argument("--qtr-hessian-damping", type=float, default=1e-8, help="Damping added to Hessian actions.")
+    parser.add_argument("--qtr-max-dense-dimension", type=int, default=120, help="Dense solver dimension limit.")
+    parser.add_argument("--qtr-cg-tolerance", type=float, default=1e-6, help="Matrix-free TR CG relative tolerance.")
+    parser.add_argument("--qtr-cg-max-iterations", type=int, default=None, help="Optional matrix-free TR CG iteration cap.")
+    parser.add_argument("--qtr-max-backtracks", type=int, default=8, help="Backtracking cap after a quotient TR proposal.")
     parser.add_argument("--opinf-reg-w", type=float, default=1e-4, help="OpInf W regularization.")
     parser.add_argument("--opinf-reg-h", type=float, default=1e-4, help="OpInf H regularization.")
     parser.add_argument("--opinf-reg-b", type=float, default=1e-4, help="OpInf B regularization.")
@@ -211,6 +241,18 @@ def parse_args() -> DemoConfig:
         bfgs_c2=args.bfgs_c2,
         bfgs_xrtol=args.bfgs_xrtol,
         adam_bfgs_adam_iterations=args.adam_bfgs_adam_iterations,
+        qtr_subproblem_solver=args.qtr_subproblem_solver,
+        qtr_initial_radius=args.qtr_initial_radius,
+        qtr_max_radius=args.qtr_max_radius,
+        qtr_acceptance_threshold=args.qtr_acceptance_threshold,
+        qtr_shrink_factor=args.qtr_shrink_factor,
+        qtr_expand_factor=args.qtr_expand_factor,
+        qtr_metric_ridge=args.qtr_metric_ridge,
+        qtr_hessian_damping=args.qtr_hessian_damping,
+        qtr_max_dense_dimension=args.qtr_max_dense_dimension,
+        qtr_cg_tolerance=args.qtr_cg_tolerance,
+        qtr_cg_max_iterations=args.qtr_cg_max_iterations,
+        qtr_max_backtracks=args.qtr_max_backtracks,
         opinf_reg_w=args.opinf_reg_w,
         opinf_reg_h=args.opinf_reg_h,
         opinf_reg_b=args.opinf_reg_b,
@@ -257,6 +299,34 @@ def validate_config(config: DemoConfig) -> None:
         raise ValueError(
             f"adam_bfgs_adam_iterations must be nonnegative, got {config.adam_bfgs_adam_iterations}"
         )
+    if config.qtr_initial_radius <= 0.0:
+        raise ValueError(f"qtr_initial_radius must be positive, got {config.qtr_initial_radius}")
+    if config.qtr_max_radius < config.qtr_initial_radius:
+        raise ValueError(
+            f"qtr_max_radius must be at least qtr_initial_radius, got {config.qtr_max_radius} < {config.qtr_initial_radius}"
+        )
+    if not (0.0 <= config.qtr_acceptance_threshold < 1.0):
+        raise ValueError(
+            f"qtr_acceptance_threshold must satisfy 0 <= eta < 1, got {config.qtr_acceptance_threshold}"
+        )
+    if not (0.0 < config.qtr_shrink_factor < 1.0):
+        raise ValueError(f"qtr_shrink_factor must satisfy 0 < factor < 1, got {config.qtr_shrink_factor}")
+    if config.qtr_expand_factor <= 1.0:
+        raise ValueError(f"qtr_expand_factor must exceed 1, got {config.qtr_expand_factor}")
+    if config.qtr_metric_ridge <= 0.0:
+        raise ValueError(f"qtr_metric_ridge must be positive, got {config.qtr_metric_ridge}")
+    if config.qtr_hessian_damping < 0.0:
+        raise ValueError(f"qtr_hessian_damping must be nonnegative, got {config.qtr_hessian_damping}")
+    if config.qtr_max_dense_dimension <= 0:
+        raise ValueError(f"qtr_max_dense_dimension must be positive, got {config.qtr_max_dense_dimension}")
+    if config.qtr_cg_tolerance <= 0.0:
+        raise ValueError(f"qtr_cg_tolerance must be positive, got {config.qtr_cg_tolerance}")
+    if config.qtr_cg_max_iterations is not None and config.qtr_cg_max_iterations <= 0:
+        raise ValueError(
+            f"qtr_cg_max_iterations must be positive when provided, got {config.qtr_cg_max_iterations}"
+        )
+    if config.qtr_max_backtracks < 0:
+        raise ValueError(f"qtr_max_backtracks must be nonnegative, got {config.qtr_max_backtracks}")
     if config.max_dt <= 0.0:
         raise ValueError(f"max_dt must be positive, got {config.max_dt}")
     if config.normalization_target_max_abs <= 0.0:
@@ -650,6 +720,20 @@ def run_demo(config: DemoConfig) -> dict[str, object] | None:
             xrtol=config.bfgs_xrtol,
         ),
         adam_bfgs=AdamBfgsUpdaterConfig(adam_iterations=config.adam_bfgs_adam_iterations),
+        quotient_trust_region=QuotientTrustRegionConfig(
+            subproblem_solver=config.qtr_subproblem_solver,
+            initial_radius=config.qtr_initial_radius,
+            max_radius=config.qtr_max_radius,
+            acceptance_threshold=config.qtr_acceptance_threshold,
+            shrink_factor=config.qtr_shrink_factor,
+            expand_factor=config.qtr_expand_factor,
+            metric_ridge=config.qtr_metric_ridge,
+            hessian_damping=config.qtr_hessian_damping,
+            max_dense_dimension=config.qtr_max_dense_dimension,
+            cg_tolerance=config.qtr_cg_tolerance,
+            cg_max_iterations=config.qtr_cg_max_iterations,
+            max_backtracks=config.qtr_max_backtracks,
+        ),
     )
     trainer = ReducedQoiTrainer(
         train_manifest=opinf_result.latent_train_manifest,
@@ -722,6 +806,20 @@ def run_demo(config: DemoConfig) -> dict[str, object] | None:
         },
         "adam_bfgs": {
             "adam_iterations": config.adam_bfgs_adam_iterations,
+        },
+        "quotient_trust_region": {
+            "subproblem_solver": config.qtr_subproblem_solver,
+            "initial_radius": config.qtr_initial_radius,
+            "max_radius": config.qtr_max_radius,
+            "acceptance_threshold": config.qtr_acceptance_threshold,
+            "shrink_factor": config.qtr_shrink_factor,
+            "expand_factor": config.qtr_expand_factor,
+            "metric_ridge": config.qtr_metric_ridge,
+            "hessian_damping": config.qtr_hessian_damping,
+            "max_dense_dimension": config.qtr_max_dense_dimension,
+            "cg_tolerance": config.qtr_cg_tolerance,
+            "cg_max_iterations": config.qtr_cg_max_iterations,
+            "max_backtracks": config.qtr_max_backtracks,
         },
         "opinf_regularization": {
             "coeff_w": config.opinf_reg_w,

@@ -19,6 +19,15 @@ from .reduced_qoi_trainer import (
     ReducedQoiTrainingResult,
     ReducedQoiTrainingSnapshot,
 )
+from .quotient_trust_region import (
+    QuotientTrustRegionConfig,
+    QuotientTrustRegionUpdater,
+    VpMetricCheckResult,
+    check_vp_metric_pullback,
+    compute_dense_vp_metric_matrix,
+    compute_vp_metric_quadratic,
+    quotient_vertical_basis,
+)
 
 __all__ = [
     "AdamUpdater",
@@ -33,6 +42,13 @@ __all__ = [
     "plot_qoi_predictions_from_run_dir",
     "NewtonActionUpdater",
     "NewtonActionUpdaterConfig",
+    "QuotientTrustRegionConfig",
+    "QuotientTrustRegionUpdater",
+    "VpMetricCheckResult",
+    "check_vp_metric_pullback",
+    "compute_dense_vp_metric_matrix",
+    "compute_vp_metric_quadratic",
+    "quotient_vertical_basis",
     "optimize_reduced_qoi_from_manifest",
     "plot_loss_curve",
     "ReducedQoiOptimizationRun",

@@ -36,6 +36,7 @@ from goattm.problems import (
 )
 from goattm.runtime import DistributedContext, FunctionTimer, timed, use_function_timer
 from goattm.solvers import TimeIntegrator, validate_time_integrator
+from goattm.train.quotient_trust_region import QuotientTrustRegionConfig, QuotientTrustRegionUpdater
 
 
 DynamicsLike = LinearDynamics | QuadraticDynamics | SkewCPQuadraticDynamics | StabilizedQuadraticDynamics
@@ -118,6 +119,7 @@ class ReducedQoiTrainerConfig:
     bfgs: BfgsUpdaterConfig = field(default_factory=BfgsUpdaterConfig)
     adam_bfgs: AdamBfgsUpdaterConfig = field(default_factory=AdamBfgsUpdaterConfig)
     newton_action: NewtonActionUpdaterConfig = field(default_factory=NewtonActionUpdaterConfig)
+    quotient_trust_region: QuotientTrustRegionConfig = field(default_factory=QuotientTrustRegionConfig)
 
 
 @dataclass(frozen=True)
@@ -527,6 +529,20 @@ class ReducedQoiTrainingLogger:
                 "cg_tolerance": config.newton_action.cg_tolerance,
                 "cg_max_iterations": config.newton_action.cg_max_iterations,
             },
+            "quotient_trust_region": {
+                "subproblem_solver": config.quotient_trust_region.subproblem_solver,
+                "initial_radius": config.quotient_trust_region.initial_radius,
+                "max_radius": config.quotient_trust_region.max_radius,
+                "acceptance_threshold": config.quotient_trust_region.acceptance_threshold,
+                "shrink_factor": config.quotient_trust_region.shrink_factor,
+                "expand_factor": config.quotient_trust_region.expand_factor,
+                "metric_ridge": config.quotient_trust_region.metric_ridge,
+                "hessian_damping": config.quotient_trust_region.hessian_damping,
+                "max_dense_dimension": config.quotient_trust_region.max_dense_dimension,
+                "cg_tolerance": config.quotient_trust_region.cg_tolerance,
+                "cg_max_iterations": config.quotient_trust_region.cg_max_iterations,
+                "max_backtracks": config.quotient_trust_region.max_backtracks,
+            },
             "decoder_regularization": {
                 "coeff_v1": regularization.coeff_v1,
                 "coeff_v2": regularization.coeff_v2,
@@ -873,9 +889,11 @@ class ReducedQoiTrainer:
             self.updater = None
         elif config.optimizer == "newton_action":
             self.updater = NewtonActionUpdater(config.newton_action)
+        elif config.optimizer == "quotient_trust_region":
+            self.updater = QuotientTrustRegionUpdater(config.quotient_trust_region)
         else:
             raise ValueError(
-                f"Unsupported optimizer '{config.optimizer}'. Supported optimizers are 'adam', 'gradient_descent', 'lbfgs', 'bfgs', 'adam_bfgs', and 'newton_action'."
+                f"Unsupported optimizer '{config.optimizer}'. Supported optimizers are 'adam', 'gradient_descent', 'lbfgs', 'bfgs', 'adam_bfgs', 'newton_action', and 'quotient_trust_region'."
             )
         logger = None
         if self.context.rank == 0:
@@ -1396,7 +1414,7 @@ class ReducedQoiTrainer:
     def _train_with_step_updater(
         self,
         initial_dynamics: DynamicsLike,
-        updater: AdamUpdater | GradientDescentUpdater | NewtonActionUpdater,
+        updater: AdamUpdater | GradientDescentUpdater | NewtonActionUpdater | QuotientTrustRegionUpdater,
         max_iterations: int,
         iteration_offset: int = 0,
         initial_best: ReducedQoiTrainingSnapshot | None = None,

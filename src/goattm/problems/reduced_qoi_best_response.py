@@ -201,7 +201,6 @@ class ReducedObjectiveWorkflow:
             dynamics=dynamics,
             decoder_template=self.decoder_template,
             regularization=self.regularization,
-            dynamics_regularization=self.dynamics_regularization,
             solve_root=self.solve_root,
         )
 
