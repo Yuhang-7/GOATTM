@@ -14,14 +14,17 @@ if str(SRC) not in sys.path:
 
 from goattm.core.parametrization import compressed_quadratic_dimension, mu_h_dimension  # noqa: E402
 from goattm.models.quadratic_decoder import QuadraticDecoder  # noqa: E402
+from goattm.models.quadratic_dynamics import QuadraticDynamics  # noqa: E402
 from goattm.models.stabilized_quadratic_dynamics import StabilizedQuadraticDynamics  # noqa: E402
 from goattm.problems.reduced_qoi_best_response import (  # noqa: E402
     DecoderTikhonovRegularization,
     DynamicsTikhonovRegularization,
     ForwardRolloutFailure,
     ObservationAlignedBestResponseEvaluator,
+    decoder_from_parameter_vector,
     dynamics_from_parameter_vector,
     dynamics_parameter_vector,
+    joint_parameter_vector,
     unpack_dynamics_parameter_vector,
 )
 from goattm.runtime.distributed import DistributedContext  # noqa: E402
@@ -278,6 +281,121 @@ class ReducedQoiBestResponseTest(unittest.TestCase):
             self.assertGreaterEqual(second_slope, 1.70)
             self.assertLessEqual(second_slope, 2.30)
 
+    def test_joint_gauss_newton_hessian_action_passes_taylor_and_symmetry_tests(self) -> None:
+        rng = np.random.default_rng(7006)
+        truth_dynamics, truth_decoder = self._build_truth_problem(rng)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = self._write_dataset(Path(tmpdir), truth_dynamics, truth_decoder, rng)
+            evaluator = ObservationAlignedBestResponseEvaluator(
+                manifest=manifest_path,
+                max_dt=0.04,
+                context=DistributedContext(),
+                dt_shrink=0.5,
+                dt_min=1e-12,
+                tol=1e-12,
+                max_iter=30,
+            )
+            base = evaluator.evaluate_joint_objective_and_gradient(truth_dynamics, truth_decoder)
+            self.assertLess(base.data_loss, 1e-10)
+
+            base_joint = joint_parameter_vector(truth_dynamics, truth_decoder)
+            dynamics_dim = dynamics_parameter_vector(truth_dynamics).shape[0]
+            direction = rng.standard_normal(base_joint.shape[0])
+            direction /= np.linalg.norm(direction)
+            hessian_action = evaluator.evaluate_joint_gauss_newton_hessian_action(
+                truth_dynamics,
+                truth_decoder,
+                direction,
+            ).action
+
+            eps_values = np.array([1e-4, 3e-4, 1e-3, 3e-3, 1e-2], dtype=float)
+            errors = []
+            for eps in eps_values:
+                perturbed_joint = base_joint + eps * direction
+                perturbed_dynamics = dynamics_from_parameter_vector(truth_dynamics, perturbed_joint[:dynamics_dim])
+                perturbed_decoder = decoder_from_parameter_vector(truth_decoder, perturbed_joint[dynamics_dim:])
+                gradient_eps = evaluator.evaluate_joint_objective_and_gradient(
+                    perturbed_dynamics,
+                    perturbed_decoder,
+                ).gradient
+                errors.append(np.linalg.norm(gradient_eps - base.gradient - eps * hessian_action))
+
+            slope = self._fit_slope(eps_values, np.asarray(errors, dtype=float))
+            self.assertGreaterEqual(slope, 1.70)
+            self.assertLessEqual(slope, 2.30)
+
+            explicit = evaluator.evaluate_joint_explicit_gauss_newton_hessian(truth_dynamics, truth_decoder).hessian
+            self.assertTrue(np.allclose(hessian_action, explicit @ direction, atol=1e-8, rtol=1e-8))
+
+            other_direction = rng.standard_normal(base_joint.shape[0])
+            other_direction /= np.linalg.norm(other_direction)
+            other_action = evaluator.evaluate_joint_gauss_newton_hessian_action(
+                truth_dynamics,
+                truth_decoder,
+                other_direction,
+            ).action
+            left = float(np.dot(direction, other_action))
+            right = float(np.dot(other_direction, hessian_action))
+            self.assertAlmostEqual(left, right, delta=1e-8 * max(1.0, abs(left), abs(right)))
+
+    def test_joint_gauss_newton_full_hessian_across_dimensions_and_directions(self) -> None:
+        rng = np.random.default_rng(7007)
+        for latent_dimension in (2, 3, 4):
+            with self.subTest(latent_dimension=latent_dimension):
+                truth_dynamics, truth_decoder = self._build_quadratic_truth_problem(latent_dimension, rng)
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    manifest_path = self._write_dataset(Path(tmpdir), truth_dynamics, truth_decoder, rng)
+                    evaluator = ObservationAlignedBestResponseEvaluator(
+                        manifest=manifest_path,
+                        max_dt=0.04,
+                        context=DistributedContext(),
+                        dt_shrink=0.5,
+                        dt_min=1e-12,
+                        tol=1e-12,
+                        max_iter=30,
+                    )
+                    base = evaluator.evaluate_joint_objective_and_gradient(truth_dynamics, truth_decoder)
+                    self.assertLess(base.data_loss, 1e-10)
+
+                    explicit = evaluator.evaluate_joint_explicit_gauss_newton_hessian(truth_dynamics, truth_decoder).hessian
+                    self.assertEqual(explicit.shape, (base.gradient.shape[0], base.gradient.shape[0]))
+                    self.assertTrue(np.all(np.isfinite(explicit)))
+                    self.assertTrue(np.allclose(explicit, explicit.T, atol=1e-8, rtol=1e-8))
+
+                    base_joint = joint_parameter_vector(truth_dynamics, truth_decoder)
+                    dynamics_dim = dynamics_parameter_vector(truth_dynamics).shape[0]
+                    for direction_index in range(4):
+                        direction = rng.standard_normal(base_joint.shape[0])
+                        direction /= np.linalg.norm(direction)
+                        hessian_action = evaluator.evaluate_joint_gauss_newton_hessian_action(
+                            truth_dynamics,
+                            truth_decoder,
+                            direction,
+                        ).action
+                        self.assertTrue(np.allclose(hessian_action, explicit @ direction, atol=1e-8, rtol=1e-8))
+
+                        eps_values = np.array([1e-4, 3e-4, 1e-3, 3e-3, 1e-2], dtype=float)
+                        errors = []
+                        for eps in eps_values:
+                            perturbed_joint = base_joint + eps * direction
+                            perturbed_dynamics = dynamics_from_parameter_vector(
+                                truth_dynamics,
+                                perturbed_joint[:dynamics_dim],
+                            )
+                            perturbed_decoder = decoder_from_parameter_vector(
+                                truth_decoder,
+                                perturbed_joint[dynamics_dim:],
+                            )
+                            gradient_eps = evaluator.evaluate_joint_objective_and_gradient(
+                                perturbed_dynamics,
+                                perturbed_decoder,
+                            ).gradient
+                            errors.append(np.linalg.norm(gradient_eps - base.gradient - eps * hessian_action))
+                        slope = self._fit_slope(eps_values, np.asarray(errors, dtype=float))
+                        self.assertGreaterEqual(slope, 1.65, msg=f"direction_index={direction_index}")
+                        self.assertLessEqual(slope, 2.35, msg=f"direction_index={direction_index}")
+
     def test_forward_rollout_failure_identifies_one_bad_sample_in_local_shard(self) -> None:
         rng = np.random.default_rng(7005)
         truth_dynamics, truth_decoder = self._build_truth_problem(rng)
@@ -342,10 +460,32 @@ class ReducedQoiBestResponseTest(unittest.TestCase):
             c=dynamics.c + scale * rng.standard_normal(dynamics.c.shape),
         )
 
+    def _build_quadratic_truth_problem(
+        self,
+        latent_dimension: int,
+        rng: np.random.Generator,
+    ) -> tuple[QuadraticDynamics, QuadraticDecoder]:
+        damping = -0.18 * np.eye(latent_dimension)
+        coupling = 0.025 * rng.standard_normal((latent_dimension, latent_dimension))
+        a = damping + coupling - coupling.T
+        dynamics = QuadraticDynamics(
+            a=a,
+            mu_h=0.003 * rng.standard_normal(mu_h_dimension(latent_dimension)),
+            b=0.08 * rng.standard_normal((latent_dimension, 1)),
+            c=0.015 * rng.standard_normal(latent_dimension),
+        )
+        output_dimension = 2
+        decoder = QuadraticDecoder(
+            v1=0.2 * rng.standard_normal((output_dimension, latent_dimension)),
+            v2=0.05 * rng.standard_normal((output_dimension, compressed_quadratic_dimension(latent_dimension))),
+            v0=0.04 * rng.standard_normal(output_dimension),
+        )
+        return dynamics, decoder
+
     def _write_dataset(
         self,
         root: Path,
-        dynamics: StabilizedQuadraticDynamics,
+        dynamics: StabilizedQuadraticDynamics | QuadraticDynamics,
         decoder: QuadraticDecoder,
         rng: np.random.Generator,
     ) -> Path:

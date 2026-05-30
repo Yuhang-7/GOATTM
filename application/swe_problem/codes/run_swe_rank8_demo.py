@@ -97,7 +97,11 @@ def parse_args() -> SweDemoConfig:
     parser.add_argument("--ntest", type=int, default=16)
     parser.add_argument("--latent-rank", type=int, default=8)
     parser.add_argument("--max-dt", type=float, default=1.0 / 600.0)
-    parser.add_argument("--time-integrator", default="rk4", choices=("implicit_midpoint", "explicit_euler", "rk4"))
+    parser.add_argument(
+        "--time-integrator",
+        default="rk4",
+        choices=("implicit_midpoint", "explicit_euler", "rk4", "skew_lagged_midpoint"),
+    )
     parser.add_argument(
         "--optimizer",
         default="lbfgs",

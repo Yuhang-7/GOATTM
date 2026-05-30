@@ -18,7 +18,7 @@ from goattm.core.parametrization import (
 from goattm.core.quadratic import quadratic_jacobian_matrix
 from goattm.data.npz_dataset import NpzQoiSample, NpzSampleManifest, load_npz_qoi_sample, load_npz_sample_manifest
 from goattm.losses import rollout_qoi_loss_and_gradients_from_cached_observation_rollout
-from goattm.losses.qoi_loss import qoi_trajectory_loss, trapezoidal_rule_weights_from_times
+from goattm.losses.qoi_loss import compute_midpoint_discrete_adjoint, qoi_trajectory_loss, trapezoidal_rule_weights_from_times
 from goattm.models.linear_dynamics import LinearDynamics
 from goattm.models.quadratic_decoder import QuadraticDecoder
 from goattm.models.quadratic_dynamics import QuadraticDynamics
@@ -38,10 +38,18 @@ from goattm.runtime.distributed import DistributedContext, sum_array_mapping
 from goattm.solvers import (
     RolloutResult,
     TimeIntegrator,
+    accumulate_explicit_euler_parameter_gradients,
     accumulate_explicit_euler_parameter_hessian_action_terms,
+    accumulate_rk4_parameter_gradients,
     accumulate_rk4_parameter_hessian_action_terms,
+    accumulate_skew_lagged_midpoint_parameter_gradients,
+    accumulate_skew_lagged_midpoint_parameter_hessian_action_terms,
+    compute_explicit_euler_discrete_adjoint,
     compute_explicit_euler_incremental_discrete_adjoint,
+    compute_rk4_discrete_adjoint,
     compute_rk4_incremental_discrete_adjoint,
+    compute_skew_lagged_midpoint_discrete_adjoint,
+    compute_skew_lagged_midpoint_incremental_discrete_adjoint,
     rollout_tangent_from_base_rollout,
     rollout_to_observation_times,
     validate_time_integrator,
@@ -163,6 +171,34 @@ class ReducedHessianActionResult:
 @dataclass(frozen=True)
 class ReducedExplicitHessianResult:
     base_state: ReducedObjectivePreparedState
+    hessian: np.ndarray
+
+
+@dataclass(frozen=True)
+class JointQoiObjectiveGradientResult:
+    data_loss: float
+    decoder_regularization_loss: float
+    dynamics_regularization_loss: float
+    dynamics_gradient: np.ndarray
+    decoder_gradient_matrix: np.ndarray
+    gradient: np.ndarray
+    dataset_result: DatasetQoiLossGradientResult
+
+    @property
+    def objective_value(self) -> float:
+        return self.data_loss + self.decoder_regularization_loss + self.dynamics_regularization_loss
+
+
+@dataclass(frozen=True)
+class JointGaussNewtonHessianActionResult:
+    direction: np.ndarray
+    action: np.ndarray
+    dynamics_action: np.ndarray
+    decoder_action_matrix: np.ndarray
+
+
+@dataclass(frozen=True)
+class JointExplicitGaussNewtonHessianResult:
     hessian: np.ndarray
 
 
@@ -600,6 +636,147 @@ class ObservationAlignedBestResponseEvaluator:
             return 0.0 if residual_sumsq <= 0.0 else float("inf")
         return float(np.sqrt(residual_sumsq / target_sumsq))
 
+    @timed("goattm.problems.ObservationAlignedBestResponseEvaluator.evaluate_joint_objective_and_gradient")
+    def evaluate_joint_objective_and_gradient(
+        self,
+        dynamics: DynamicsLike,
+        decoder: QuadraticDecoder,
+        regularization: DecoderTikhonovRegularization | None = None,
+        dynamics_regularization: DynamicsTikhonovRegularization | None = None,
+    ) -> JointQoiObjectiveGradientResult:
+        if regularization is None:
+            regularization = DecoderTikhonovRegularization()
+        if dynamics_regularization is None:
+            dynamics_regularization = DynamicsTikhonovRegularization()
+        dataset_result = self.evaluate_dataset_loss_and_gradients(dynamics, decoder)
+        dynamics_gradient = pack_dynamics_gradient_vector(dynamics, dataset_result.dynamics_gradients)
+        dynamics_gradient = dynamics_gradient + dynamics_regularization_gradient_vector(dynamics, dynamics_regularization)
+        decoder_gradient_matrix = stack_decoder_gradient_matrix(dataset_result.decoder_gradients, decoder.form)
+        decoder_gradient_matrix = decoder_gradient_matrix + decoder_regularization_gradient_matrix(decoder, regularization)
+        gradient = np.concatenate(
+            [
+                dynamics_gradient.reshape(-1),
+                decoder_gradient_matrix.reshape(-1),
+            ],
+            axis=0,
+        )
+        return JointQoiObjectiveGradientResult(
+            data_loss=dataset_result.total_loss,
+            decoder_regularization_loss=decoder_regularization_loss(decoder, regularization),
+            dynamics_regularization_loss=dynamics_regularization_loss(dynamics, dynamics_regularization),
+            dynamics_gradient=dynamics_gradient,
+            decoder_gradient_matrix=decoder_gradient_matrix,
+            gradient=gradient,
+            dataset_result=dataset_result,
+        )
+
+    @timed("goattm.problems.ObservationAlignedBestResponseEvaluator.evaluate_joint_gauss_newton_hessian_action")
+    def evaluate_joint_gauss_newton_hessian_action(
+        self,
+        dynamics: DynamicsLike,
+        decoder: QuadraticDecoder,
+        direction: np.ndarray,
+        regularization: DecoderTikhonovRegularization | None = None,
+        dynamics_regularization: DynamicsTikhonovRegularization | None = None,
+    ) -> JointGaussNewtonHessianActionResult:
+        if isinstance(dynamics, SkewCPQuadraticDynamics):
+            raise NotImplementedError("Joint Gauss-Newton Hessian actions are not implemented for skew-CP dynamics yet.")
+        if regularization is None:
+            regularization = DecoderTikhonovRegularization()
+        if dynamics_regularization is None:
+            dynamics_regularization = DynamicsTikhonovRegularization()
+        direction_vector = np.asarray(direction, dtype=np.float64).reshape(-1)
+        dynamics_direction_vector, decoder_direction_matrix = split_joint_parameter_vector(dynamics, decoder, direction_vector)
+        dynamics_direction = unpack_dynamics_parameter_vector(dynamics, dynamics_direction_vector)
+        decoder_direction = matrix_to_decoder(dynamics.dimension, decoder.output_dimension, decoder_direction_matrix)
+
+        total_decoder_action = np.zeros_like(decoder_direction_matrix, dtype=np.float64)
+        total_dynamics_gradients = _zero_dynamics_gradients(dynamics)
+        local_rollouts = self.get_forward_rollouts(dynamics).local_rollouts
+        for rollout_entry in local_rollouts:
+            tangent_states = rollout_tangent_from_base_rollout(
+                dynamics=dynamics,
+                base_rollout=rollout_entry.rollout,
+                parameter_action=lambda midpoint_state, midpoint_time, input_function=rollout_entry.input_function: rhs_parameter_action(  # noqa: E731
+                    dynamics,
+                    dynamics_direction,
+                    midpoint_state,
+                    midpoint_time,
+                    input_function=input_function,
+                ),
+                input_function=rollout_entry.input_function,
+                time_integrator=self.time_integrator,
+            )
+            observed_tangents = tangent_states[rollout_entry.observation_indices]
+            state_loss_gradients = np.zeros_like(rollout_entry.rollout.states, dtype=np.float64)
+            for local_idx, global_idx in enumerate(rollout_entry.observation_indices):
+                state = rollout_entry.rollout.states[global_idx]
+                state_tangent = observed_tangents[local_idx]
+                weight = float(rollout_entry.observation_weights[local_idx])
+                phi = decoder_feature_vector(state, decoder.form)
+                delta_residual = decoder.jacobian(state) @ state_tangent + decoder_direction.decode(state)
+                weighted_delta_residual = weight * delta_residual
+                total_decoder_action += np.outer(phi, weighted_delta_residual)
+                state_loss_gradients[global_idx] = decoder.jacobian(state).T @ weighted_delta_residual
+
+            sample_gradients = _dynamics_gradients_from_state_loss_gradients(
+                dynamics=dynamics,
+                rollout=rollout_entry.rollout,
+                state_loss_gradients=state_loss_gradients,
+                input_function=rollout_entry.input_function,
+                time_integrator=self.time_integrator,
+            )
+            for key, value in sample_gradients.items():
+                total_dynamics_gradients[key] += value
+
+        self.increment_solve_count("tangent_forward", len(local_rollouts))
+        self.increment_solve_count("adjoint", len(local_rollouts))
+        dynamics_action = pack_dynamics_gradient_vector(
+            dynamics,
+            sum_array_mapping(total_dynamics_gradients, self.context),
+        )
+        decoder_action_matrix = self.context.allreduce_array_sum(total_decoder_action)
+        dynamics_action = dynamics_action + dynamics_regularization_hessian_action(
+            dynamics,
+            dynamics_regularization,
+            dynamics_direction_vector,
+        )
+        decoder_action_matrix = decoder_action_matrix + decoder_regularization_hessian_action_matrix(
+            decoder,
+            regularization,
+            decoder_direction_matrix,
+        )
+        action = pack_joint_parameter_vector(dynamics_action, decoder_action_matrix)
+        return JointGaussNewtonHessianActionResult(
+            direction=direction_vector.copy(),
+            action=action,
+            dynamics_action=dynamics_action,
+            decoder_action_matrix=decoder_action_matrix,
+        )
+
+    @timed("goattm.problems.ObservationAlignedBestResponseEvaluator.evaluate_joint_explicit_gauss_newton_hessian")
+    def evaluate_joint_explicit_gauss_newton_hessian(
+        self,
+        dynamics: DynamicsLike,
+        decoder: QuadraticDecoder,
+        regularization: DecoderTikhonovRegularization | None = None,
+        dynamics_regularization: DynamicsTikhonovRegularization | None = None,
+    ) -> JointExplicitGaussNewtonHessianResult:
+        dimension = joint_parameter_dimension(dynamics, decoder)
+        basis = np.eye(dimension, dtype=np.float64)
+        hessian = np.zeros((dimension, dimension), dtype=np.float64)
+        for column_idx in range(dimension):
+            action_result = self.evaluate_joint_gauss_newton_hessian_action(
+                dynamics=dynamics,
+                decoder=decoder,
+                direction=basis[:, column_idx],
+                regularization=regularization,
+                dynamics_regularization=dynamics_regularization,
+            )
+            hessian[:, column_idx] = action_result.action
+        hessian = 0.5 * (hessian + hessian.T)
+        return JointExplicitGaussNewtonHessianResult(hessian=hessian)
+
     def build_reduced_objective_workflow(
         self,
         decoder_template: QuadraticDecoder,
@@ -987,7 +1164,7 @@ class ObservationAlignedBestResponseEvaluator:
                     adjoint_tangents=adjoint_tangents,
                     input_function=rollout_entry.input_function,
                 )
-            else:
+            elif self.time_integrator == "rk4":
                 state_loss_grad_direction = np.zeros_like(rollout_entry.rollout.states, dtype=np.float64)
                 observed_tangents = tangent_states[rollout_entry.observation_indices]
                 for local_idx, global_idx in enumerate(rollout_entry.observation_indices):
@@ -1031,6 +1208,50 @@ class ObservationAlignedBestResponseEvaluator:
                     input_function=rollout_entry.input_function,
                     parameter_action=parameter_action,
                     jacobian_direction=jacobian_direction,
+                )
+            else:
+                state_loss_grad_direction = np.zeros_like(rollout_entry.rollout.states, dtype=np.float64)
+                observed_tangents = tangent_states[rollout_entry.observation_indices]
+                for local_idx, global_idx in enumerate(rollout_entry.observation_indices):
+                    state_loss_grad_direction[global_idx] = _observation_state_loss_gradient_direction(
+                        decoder=base_result.decoder,
+                        decoder_direction=decoder_direction,
+                        state=rollout_entry.rollout.states[global_idx],
+                        state_tangent=observed_tangents[local_idx],
+                        residual=sample_result.decoder_partials.residuals[local_idx],
+                        weight=float(sample_result.decoder_partials.quadrature_weights[local_idx]),
+                    )
+                parameter_action = lambda step_state, step_time, input_function=rollout_entry.input_function: rhs_parameter_action(  # noqa: E731
+                    prepared_state.dynamics,
+                    dynamics_direction,
+                    step_state,
+                    step_time,
+                    input_function=input_function,
+                )
+                perturb_eps = 1.0e-6 / max(1.0, float(np.linalg.norm(direction_vector)))
+                make_perturbed_dynamics = lambda eps, base_vector=base_vector, direction_vector=direction_vector: dynamics_from_parameter_vector(  # noqa: E731,E501
+                    prepared_state.dynamics,
+                    base_vector + eps * direction_vector,
+                )
+                adjoint_tangents = compute_skew_lagged_midpoint_incremental_discrete_adjoint(
+                    dynamics=prepared_state.dynamics,
+                    rollout=rollout_entry.rollout,
+                    tangent_states=tangent_states,
+                    base_adjoints=sample_result.adjoints,
+                    state_loss_gradient_direction=state_loss_grad_direction,
+                    make_perturbed_dynamics=make_perturbed_dynamics,
+                    input_function=rollout_entry.input_function,
+                    finite_difference_epsilon=perturb_eps,
+                )
+                sample_a_grad, sample_delta_a_grad, sample_h_grad, sample_delta_h_grad, sample_b_grad, sample_delta_b_grad, sample_c_grad, sample_delta_c_grad = accumulate_skew_lagged_midpoint_parameter_hessian_action_terms(  # noqa: E501
+                    dynamics=prepared_state.dynamics,
+                    rollout=rollout_entry.rollout,
+                    tangent_states=tangent_states,
+                    adjoints=sample_result.adjoints,
+                    adjoint_tangents=adjoint_tangents,
+                    make_perturbed_dynamics=make_perturbed_dynamics,
+                    input_function=rollout_entry.input_function,
+                    finite_difference_epsilon=perturb_eps,
                 )
             total_a_grad += sample_a_grad
             total_delta_a_grad += sample_delta_a_grad
@@ -1280,6 +1501,55 @@ def matrix_to_decoder(latent_dimension: int, output_dimension: int, x_matrix: np
         decoder_form = "V1V2v"
     v0 = x_matrix[-1].copy()
     return QuadraticDecoder(v1=v1, v2=v2, v0=v0, form=decoder_form)
+
+
+def decoder_parameter_vector(decoder: QuadraticDecoder) -> np.ndarray:
+    return decoder_parameter_matrix(decoder).reshape(-1).astype(np.float64, copy=True)
+
+
+def decoder_from_parameter_vector(decoder_template: QuadraticDecoder, vector: np.ndarray) -> QuadraticDecoder:
+    feature_dim = decoder_feature_dimension(decoder_template.latent_dimension, decoder_template.form)
+    expected = feature_dim * decoder_template.output_dimension
+    flat = np.asarray(vector, dtype=np.float64).reshape(-1)
+    if flat.shape[0] != expected:
+        raise ValueError(f"decoder vector must have length {expected}, got {flat.shape[0]}")
+    return matrix_to_decoder(
+        decoder_template.latent_dimension,
+        decoder_template.output_dimension,
+        flat.reshape(feature_dim, decoder_template.output_dimension),
+    )
+
+
+def joint_parameter_vector(dynamics: DynamicsLike, decoder: QuadraticDecoder) -> np.ndarray:
+    return np.concatenate([dynamics_parameter_vector(dynamics), decoder_parameter_vector(decoder)], axis=0)
+
+
+def joint_parameter_dimension(dynamics: DynamicsLike, decoder: QuadraticDecoder) -> int:
+    return int(joint_parameter_vector(dynamics, decoder).shape[0])
+
+
+def split_joint_parameter_vector(
+    dynamics: DynamicsLike,
+    decoder: QuadraticDecoder,
+    vector: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    flat = np.asarray(vector, dtype=np.float64).reshape(-1)
+    dynamics_dim = dynamics_parameter_dimension(dynamics)
+    decoder_shape = decoder_parameter_matrix(decoder).shape
+    expected = dynamics_dim + int(np.prod(decoder_shape))
+    if flat.shape[0] != expected:
+        raise ValueError(f"joint vector must have length {expected}, got {flat.shape[0]}")
+    return flat[:dynamics_dim].copy(), flat[dynamics_dim:].reshape(decoder_shape).copy()
+
+
+def pack_joint_parameter_vector(dynamics_vector: np.ndarray, decoder_matrix: np.ndarray) -> np.ndarray:
+    return np.concatenate(
+        [
+            np.asarray(dynamics_vector, dtype=np.float64).reshape(-1),
+            np.asarray(decoder_matrix, dtype=np.float64).reshape(-1),
+        ],
+        axis=0,
+    )
 
 
 def dynamics_parameter_dimension(dynamics: DynamicsLike) -> int:
@@ -1718,6 +1988,112 @@ def _pack_dynamic_hessian_action_vector(
     return pack_dynamics_gradient_vector(dynamics, gradients)
 
 
+def _pack_dynamics_gradient_from_explicit_terms(
+    dynamics: DynamicsLike,
+    a_grad: np.ndarray,
+    h_grad: np.ndarray,
+    b_grad: np.ndarray | None,
+    c_grad: np.ndarray,
+) -> dict[str, np.ndarray]:
+    if isinstance(dynamics, SkewCPQuadraticDynamics):
+        raise NotImplementedError("Joint Gauss-Newton Hessian actions are not implemented for skew-CP dynamics yet.")
+    gradients: dict[str, np.ndarray] = {"c": c_grad}
+    if isinstance(dynamics, StabilizedQuadraticDynamics):
+        s_grad, w_grad = dynamics.pullback_a_gradient_to_stabilized_params(a_grad)
+        gradients["s_params"] = s_grad
+        gradients["w_params"] = w_grad
+        gradients["mu_h"] = dynamics.pullback_h_gradient_to_mu_h(h_grad)
+    elif isinstance(dynamics, LinearDynamics):
+        gradients["a"] = a_grad
+    else:
+        gradients["a"] = a_grad
+        gradients["mu_h"] = dynamics.pullback_h_gradient_to_mu_h(h_grad)
+    if b_grad is not None:
+        gradients["b"] = b_grad
+    return gradients
+
+
+def _dynamics_gradients_from_state_loss_gradients(
+    dynamics: DynamicsLike,
+    rollout: RolloutResult,
+    state_loss_gradients: np.ndarray,
+    input_function: Callable[[float], np.ndarray] | None,
+    time_integrator: TimeIntegrator,
+) -> dict[str, np.ndarray]:
+    if isinstance(dynamics, SkewCPQuadraticDynamics):
+        raise NotImplementedError("Joint Gauss-Newton Hessian actions are not implemented for skew-CP dynamics yet.")
+    integrator = validate_time_integrator(time_integrator)
+    if state_loss_gradients.shape != rollout.states.shape:
+        raise ValueError(f"state_loss_gradients must have shape {rollout.states.shape}, got {state_loss_gradients.shape}")
+    if integrator == "implicit_midpoint":
+        adjoints = compute_midpoint_discrete_adjoint(
+            dynamics=dynamics,
+            states=rollout.states,
+            times=rollout.times,
+            dt_history=rollout.dt_history,
+            state_loss_gradients=state_loss_gradients,
+        )
+        a_grad = np.zeros((dynamics.dimension, dynamics.dimension), dtype=np.float64)
+        h_grad = np.zeros_like(dynamics.h_matrix, dtype=np.float64)
+        c_grad = np.zeros(dynamics.dimension, dtype=np.float64)
+        b_grad = None if getattr(dynamics, "b", None) is None else np.zeros_like(dynamics.b, dtype=np.float64)
+        for n in range(rollout.accepted_steps):
+            dt = float(rollout.dt_history[n])
+            midpoint_state = 0.5 * (rollout.states[n] + rollout.states[n + 1])
+            midpoint_time = float(rollout.times[n] + 0.5 * dt)
+            lam = adjoints[n + 1]
+            a_grad += -dt * np.outer(lam, midpoint_state)
+            h_grad += -dt * np.outer(lam, quadratic_features(midpoint_state))
+            c_grad += -dt * lam
+            if b_grad is not None and input_function is not None:
+                b_grad += -dt * np.outer(lam, np.asarray(input_function(midpoint_time), dtype=np.float64))
+    elif integrator == "explicit_euler":
+        adjoints = compute_explicit_euler_discrete_adjoint(
+            dynamics=dynamics,
+            states=rollout.states,
+            times=rollout.times,
+            dt_history=rollout.dt_history,
+            state_loss_gradients=state_loss_gradients,
+        )
+        a_grad, h_grad, b_grad, c_grad = accumulate_explicit_euler_parameter_gradients(
+            dynamics=dynamics,
+            rollout=rollout,
+            adjoints=adjoints,
+            input_function=input_function,
+        )
+    elif integrator == "rk4":
+        adjoints = compute_rk4_discrete_adjoint(
+            dynamics=dynamics,
+            states=rollout.states,
+            times=rollout.times,
+            dt_history=rollout.dt_history,
+            state_loss_gradients=state_loss_gradients,
+            input_function=input_function,
+        )
+        a_grad, h_grad, b_grad, c_grad = accumulate_rk4_parameter_gradients(
+            dynamics=dynamics,
+            rollout=rollout,
+            adjoints=adjoints,
+            input_function=input_function,
+        )
+    else:
+        adjoints = compute_skew_lagged_midpoint_discrete_adjoint(
+            dynamics=dynamics,
+            states=rollout.states,
+            times=rollout.times,
+            dt_history=rollout.dt_history,
+            state_loss_gradients=state_loss_gradients,
+            input_function=input_function,
+        )
+        a_grad, h_grad, b_grad, c_grad = accumulate_skew_lagged_midpoint_parameter_gradients(
+            dynamics=dynamics,
+            rollout=rollout,
+            adjoints=adjoints,
+            input_function=input_function,
+        )
+    return _pack_dynamics_gradient_from_explicit_terms(dynamics, a_grad, h_grad, b_grad, c_grad)
+
+
 def dynamics_regularization_loss(
     dynamics: DynamicsLike,
     regularization: DynamicsTikhonovRegularization,
@@ -1803,6 +2179,26 @@ def decoder_regularization_loss(
         + (0.0 if decoder.form == "V1v" else regularization.coeff_v2 * np.sum(decoder.v2**2))
         + regularization.coeff_v0 * np.sum(decoder.v0**2)
     )
+
+
+def decoder_regularization_gradient_matrix(
+    decoder: QuadraticDecoder,
+    regularization: DecoderTikhonovRegularization,
+) -> np.ndarray:
+    diagonal = regularization.diagonal(decoder.latent_dimension, decoder.form)
+    return diagonal[:, None] * decoder_parameter_matrix(decoder)
+
+
+def decoder_regularization_hessian_action_matrix(
+    decoder: QuadraticDecoder,
+    regularization: DecoderTikhonovRegularization,
+    direction_matrix: np.ndarray,
+) -> np.ndarray:
+    expected_shape = decoder_parameter_matrix(decoder).shape
+    if direction_matrix.shape != expected_shape:
+        raise ValueError(f"direction_matrix must have shape {expected_shape}, got {direction_matrix.shape}")
+    diagonal = regularization.diagonal(decoder.latent_dimension, decoder.form)
+    return diagonal[:, None] * np.asarray(direction_matrix, dtype=np.float64)
 
 
 def stack_decoder_gradient_matrix(decoder_gradients: dict[str, np.ndarray], decoder_form: str = "V1V2v") -> np.ndarray:

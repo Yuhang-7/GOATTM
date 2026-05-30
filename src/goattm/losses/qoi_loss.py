@@ -22,6 +22,10 @@ from goattm.solvers.rk4 import (
     accumulate_rk4_skew_cp_parameter_gradients,
     compute_rk4_discrete_adjoint,
 )
+from goattm.solvers.skew_lagged_midpoint import (
+    accumulate_skew_lagged_midpoint_parameter_gradients,
+    compute_skew_lagged_midpoint_discrete_adjoint,
+)
 from goattm.solvers.time_integration import TimeIntegrator, rollout_to_final_time, rollout_to_observation_times, validate_time_integrator
 
 
@@ -478,7 +482,7 @@ def _rollout_result_to_loss_and_gradients(
                 adjoints=adjoints,
                 input_function=input_function,
             )
-    else:
+    elif integrator == "rk4":
         adjoints = compute_rk4_discrete_adjoint(
             dynamics=dynamics,
             states=rollout.states,
@@ -501,6 +505,23 @@ def _rollout_result_to_loss_and_gradients(
                 adjoints=adjoints,
                 input_function=input_function,
             )
+    else:
+        if isinstance(dynamics, SkewCPQuadraticDynamics):
+            raise NotImplementedError("skew_lagged_midpoint adjoint is implemented for compressed quadratic dynamics.")
+        adjoints = compute_skew_lagged_midpoint_discrete_adjoint(
+            dynamics=dynamics,
+            states=rollout.states,
+            times=rollout.times,
+            dt_history=rollout.dt_history,
+            state_loss_gradients=full_state_loss_gradients,
+            input_function=input_function,
+        )
+        a_grad, h_grad, b_grad, c_grad = accumulate_skew_lagged_midpoint_parameter_gradients(
+            dynamics=dynamics,
+            rollout=rollout,
+            adjoints=adjoints,
+            input_function=input_function,
+        )
 
     if isinstance(dynamics, SkewCPQuadraticDynamics):
         dynamics_gradients = _pack_skew_cp_dynamics_gradients(

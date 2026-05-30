@@ -21,16 +21,22 @@ from goattm.solvers.rk4 import (
     rollout_rk4_tangent_from_base_rollout,
     rollout_rk4_to_observation_times,
 )
+from goattm.solvers.skew_lagged_midpoint import (
+    rollout_skew_lagged_midpoint,
+    rollout_skew_lagged_midpoint_tangent_from_base_rollout,
+    rollout_skew_lagged_midpoint_to_observation_times,
+)
 
 
-TimeIntegrator = Literal["implicit_midpoint", "explicit_euler", "rk4"]
+TimeIntegrator = Literal["implicit_midpoint", "explicit_euler", "rk4", "skew_lagged_midpoint"]
 
 
 def validate_time_integrator(time_integrator: str) -> TimeIntegrator:
-    if time_integrator not in ("implicit_midpoint", "explicit_euler", "rk4"):
+    if time_integrator not in ("implicit_midpoint", "explicit_euler", "rk4", "skew_lagged_midpoint"):
         raise ValueError(
             f"Unsupported time integrator '{time_integrator}'. "
-            "Supported values are 'implicit_midpoint', 'explicit_euler', and 'rk4'."
+            "Supported values are 'implicit_midpoint', 'explicit_euler', 'rk4', "
+            "and 'skew_lagged_midpoint'."
         )
     return time_integrator  # type: ignore[return-value]
 
@@ -62,6 +68,14 @@ def rollout_to_final_time(
         )
     if integrator == "explicit_euler":
         return rollout_explicit_euler(
+            dynamics=dynamics,
+            u0=u0,
+            t_final=t_final,
+            max_dt=max_dt,
+            input_function=input_function,
+        )
+    if integrator == "skew_lagged_midpoint":
+        return rollout_skew_lagged_midpoint(
             dynamics=dynamics,
             u0=u0,
             t_final=t_final,
@@ -110,6 +124,14 @@ def rollout_to_observation_times(
             max_dt=max_dt,
             input_function=input_function,
         )
+    if integrator == "skew_lagged_midpoint":
+        return rollout_skew_lagged_midpoint_to_observation_times(
+            dynamics=dynamics,
+            u0=u0,
+            observation_times=observation_times,
+            max_dt=max_dt,
+            input_function=input_function,
+        )
     return rollout_rk4_to_observation_times(
         dynamics=dynamics,
         u0=u0,
@@ -138,6 +160,13 @@ def rollout_tangent_from_base_rollout(
             dynamics=dynamics,
             base_rollout=base_rollout,
             parameter_action=parameter_action,
+        )
+    if integrator == "skew_lagged_midpoint":
+        return rollout_skew_lagged_midpoint_tangent_from_base_rollout(
+            dynamics=dynamics,
+            base_rollout=base_rollout,
+            parameter_action=parameter_action,
+            input_function=input_function,
         )
     return rollout_rk4_tangent_from_base_rollout(
         dynamics=dynamics,
