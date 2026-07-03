@@ -2251,3 +2251,53 @@ def _hashed_key(tag: str, vector: np.ndarray) -> str:
     hasher.update(np.array(contiguous.shape, dtype=np.int64).tobytes())
     hasher.update(contiguous.tobytes())
     return hasher.hexdigest()
+
+
+def _softplus(value: float) -> float:
+    if value > 40.0:
+        return float(value)
+    if value < -40.0:
+        return float(np.exp(value))
+    return float(np.log1p(np.exp(value)))
+
+
+def _sigmoid(value: float) -> float:
+    if value >= 0.0:
+        exp_neg = np.exp(-value)
+        return float(1.0 / (1.0 + exp_neg))
+    exp_pos = np.exp(value)
+    return float(exp_pos / (1.0 + exp_pos))
+
+
+def symmetric_part_largest_eigenvalue(a_matrix: np.ndarray) -> float:
+    sym_a = 0.5 * (np.asarray(a_matrix, dtype=np.float64) + np.asarray(a_matrix, dtype=np.float64).T)
+    eigenvalues = np.linalg.eigvalsh(sym_a)
+    return float(eigenvalues[-1])
+
+
+def spectral_abscissa_softplus_penalty(
+    a_matrix: np.ndarray,
+    coefficient: float,
+    alpha: float = 0.0,
+) -> float:
+    if coefficient == 0.0:
+        return 0.0
+    z = symmetric_part_largest_eigenvalue(a_matrix) - float(alpha)
+    smooth_positive_part = _softplus(z)
+    return float(coefficient) * smooth_positive_part * smooth_positive_part
+
+
+def spectral_abscissa_softplus_gradient_matrix(
+    a_matrix: np.ndarray,
+    coefficient: float,
+    alpha: float = 0.0,
+) -> np.ndarray:
+    a_array = np.asarray(a_matrix, dtype=np.float64)
+    if coefficient == 0.0:
+        return np.zeros_like(a_array, dtype=np.float64)
+    sym_a = 0.5 * (a_array + a_array.T)
+    eigenvalues, eigenvectors = np.linalg.eigh(sym_a)
+    z = float(eigenvalues[-1]) - float(alpha)
+    scale = float(coefficient) * 2.0 * _softplus(z) * _sigmoid(z)
+    dominant = eigenvectors[:, -1]
+    return scale * np.outer(dominant, dominant)

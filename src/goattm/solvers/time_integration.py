@@ -16,27 +16,31 @@ from goattm.solvers.implicit_midpoint import (
     rollout_implicit_midpoint_tangent_from_base_rollout,
     rollout_implicit_midpoint_to_observation_times,
 )
+from goattm.solvers.crank_nicolson import (
+    rollout_crank_nicolson,
+    rollout_crank_nicolson_tangent_from_base_rollout,
+    rollout_crank_nicolson_to_observation_times,
+)
+from goattm.solvers.lagged_midpoint import (
+    rollout_lagged_midpoint,
+    rollout_lagged_midpoint_tangent_from_base_rollout,
+    rollout_lagged_midpoint_to_observation_times,
+)
 from goattm.solvers.rk4 import (
     rollout_rk4,
     rollout_rk4_tangent_from_base_rollout,
     rollout_rk4_to_observation_times,
 )
-from goattm.solvers.skew_lagged_midpoint import (
-    rollout_skew_lagged_midpoint,
-    rollout_skew_lagged_midpoint_tangent_from_base_rollout,
-    rollout_skew_lagged_midpoint_to_observation_times,
-)
 
 
-TimeIntegrator = Literal["implicit_midpoint", "explicit_euler", "rk4", "skew_lagged_midpoint"]
+TimeIntegrator = Literal["implicit_midpoint", "lagged_midpoint", "crank_nicolson", "explicit_euler", "rk4"]
 
 
 def validate_time_integrator(time_integrator: str) -> TimeIntegrator:
-    if time_integrator not in ("implicit_midpoint", "explicit_euler", "rk4", "skew_lagged_midpoint"):
+    if time_integrator not in ("implicit_midpoint", "lagged_midpoint", "crank_nicolson", "explicit_euler", "rk4"):
         raise ValueError(
             f"Unsupported time integrator '{time_integrator}'. "
-            "Supported values are 'implicit_midpoint', 'explicit_euler', 'rk4', "
-            "and 'skew_lagged_midpoint'."
+            "Supported values are 'implicit_midpoint', 'lagged_midpoint', 'crank_nicolson', 'explicit_euler', and 'rk4'."
         )
     return time_integrator  # type: ignore[return-value]
 
@@ -66,16 +70,28 @@ def rollout_to_final_time(
             tol=tol,
             max_iter=max_iter,
         )
-    if integrator == "explicit_euler":
-        return rollout_explicit_euler(
+    if integrator == "crank_nicolson":
+        return rollout_crank_nicolson(
+            dynamics=dynamics,
+            u0=u0,
+            t_final=t_final,
+            dt_initial=max_dt,
+            input_function=input_function,
+            dt_shrink=dt_shrink,
+            dt_min=dt_min,
+            tol=tol,
+            max_iter=max_iter,
+        )
+    if integrator == "lagged_midpoint":
+        return rollout_lagged_midpoint(
             dynamics=dynamics,
             u0=u0,
             t_final=t_final,
             max_dt=max_dt,
             input_function=input_function,
         )
-    if integrator == "skew_lagged_midpoint":
-        return rollout_skew_lagged_midpoint(
+    if integrator == "explicit_euler":
+        return rollout_explicit_euler(
             dynamics=dynamics,
             u0=u0,
             t_final=t_final,
@@ -116,16 +132,28 @@ def rollout_to_observation_times(
             tol=tol,
             max_iter=max_iter,
         )
-    if integrator == "explicit_euler":
-        return rollout_explicit_euler_to_observation_times(
+    if integrator == "crank_nicolson":
+        return rollout_crank_nicolson_to_observation_times(
+            dynamics=dynamics,
+            u0=u0,
+            observation_times=observation_times,
+            max_dt=max_dt,
+            input_function=input_function,
+            dt_shrink=dt_shrink,
+            dt_min=dt_min,
+            tol=tol,
+            max_iter=max_iter,
+        )
+    if integrator == "lagged_midpoint":
+        return rollout_lagged_midpoint_to_observation_times(
             dynamics=dynamics,
             u0=u0,
             observation_times=observation_times,
             max_dt=max_dt,
             input_function=input_function,
         )
-    if integrator == "skew_lagged_midpoint":
-        return rollout_skew_lagged_midpoint_to_observation_times(
+    if integrator == "explicit_euler":
+        return rollout_explicit_euler_to_observation_times(
             dynamics=dynamics,
             u0=u0,
             observation_times=observation_times,
@@ -155,18 +183,24 @@ def rollout_tangent_from_base_rollout(
             base_rollout=base_rollout,
             parameter_action=parameter_action,
         )
+    if integrator == "crank_nicolson":
+        return rollout_crank_nicolson_tangent_from_base_rollout(
+            dynamics=dynamics,
+            base_rollout=base_rollout,
+            parameter_action=parameter_action,
+        )
+    if integrator == "lagged_midpoint":
+        return rollout_lagged_midpoint_tangent_from_base_rollout(
+            dynamics=dynamics,
+            base_rollout=base_rollout,
+            parameter_action=parameter_action,
+            input_function=input_function,
+        )
     if integrator == "explicit_euler":
         return rollout_explicit_euler_tangent_from_base_rollout(
             dynamics=dynamics,
             base_rollout=base_rollout,
             parameter_action=parameter_action,
-        )
-    if integrator == "skew_lagged_midpoint":
-        return rollout_skew_lagged_midpoint_tangent_from_base_rollout(
-            dynamics=dynamics,
-            base_rollout=base_rollout,
-            parameter_action=parameter_action,
-            input_function=input_function,
         )
     return rollout_rk4_tangent_from_base_rollout(
         dynamics=dynamics,

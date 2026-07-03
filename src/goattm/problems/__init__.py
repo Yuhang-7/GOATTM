@@ -47,6 +47,9 @@ from .reduced_qoi_best_response import (
     regularization_key,
     rhs_parameter_action,
     stack_decoder_gradient_matrix,
+    spectral_abscissa_softplus_gradient_matrix,
+    spectral_abscissa_softplus_penalty,
+    symmetric_part_largest_eigenvalue,
     unpack_dynamics_parameter_vector,
 )
 
@@ -97,6 +100,9 @@ __all__ = [
     "rhs_parameter_action",
     "solve_decoder_normal_equation",
     "stack_decoder_gradient_matrix",
+    "spectral_abscissa_softplus_gradient_matrix",
+    "spectral_abscissa_softplus_penalty",
+    "symmetric_part_largest_eigenvalue",
     "unpack_dynamics_parameter_vector",
     "update_decoder_from_normal_equation",
 ]

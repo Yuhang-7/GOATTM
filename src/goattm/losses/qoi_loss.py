@@ -9,27 +9,29 @@ from goattm.core.parametrization import quadratic_features
 from goattm.models.linear_dynamics import LinearDynamics
 from goattm.models.quadratic_decoder import QuadraticDecoder
 from goattm.models.quadratic_dynamics import QuadraticDynamics
-from goattm.models.skew_cp_quadratic_dynamics import SkewCPQuadraticDynamics
 from goattm.models.stabilized_quadratic_dynamics import StabilizedQuadraticDynamics
 from goattm.runtime import timed
 from goattm.solvers.explicit_euler import (
     accumulate_explicit_euler_parameter_gradients,
     compute_explicit_euler_discrete_adjoint,
 )
+from goattm.solvers.crank_nicolson import (
+    accumulate_crank_nicolson_parameter_gradients,
+    compute_crank_nicolson_discrete_adjoint,
+)
+from goattm.solvers.lagged_midpoint import (
+    accumulate_lagged_midpoint_parameter_gradients,
+    compute_lagged_midpoint_discrete_adjoint,
+)
 from goattm.solvers.implicit_midpoint import RolloutResult
 from goattm.solvers.rk4 import (
     accumulate_rk4_parameter_gradients,
-    accumulate_rk4_skew_cp_parameter_gradients,
     compute_rk4_discrete_adjoint,
-)
-from goattm.solvers.skew_lagged_midpoint import (
-    accumulate_skew_lagged_midpoint_parameter_gradients,
-    compute_skew_lagged_midpoint_discrete_adjoint,
 )
 from goattm.solvers.time_integration import TimeIntegrator, rollout_to_final_time, rollout_to_observation_times, validate_time_integrator
 
 
-DynamicsLike = LinearDynamics | QuadraticDynamics | SkewCPQuadraticDynamics | StabilizedQuadraticDynamics
+DynamicsLike = LinearDynamics | QuadraticDynamics | StabilizedQuadraticDynamics
 
 
 @dataclass(frozen=True)
@@ -180,52 +182,6 @@ def compute_midpoint_discrete_adjoint(
     return adjoints
 
 
-def _accumulate_skew_cp_parameter_gradients(
-    dynamics: SkewCPQuadraticDynamics,
-    state: np.ndarray,
-    adjoint: np.ndarray,
-    scale: float,
-    a_grad: np.ndarray,
-    skew_u_grad: np.ndarray,
-    skew_v_grad: np.ndarray,
-    skew_z_grad: np.ndarray,
-    b_grad: np.ndarray | None,
-    c_grad: np.ndarray,
-    input_vector: np.ndarray | None = None,
-) -> None:
-    a_grad += scale * np.outer(adjoint, state)
-    du, dv, dz = dynamics.quadratic_parameter_gradient(state, adjoint, scale=scale)
-    skew_u_grad += du
-    skew_v_grad += dv
-    skew_z_grad += dz
-    c_grad += scale * adjoint
-    if b_grad is not None and input_vector is not None:
-        b_grad += scale * np.outer(adjoint, input_vector)
-
-
-def _pack_skew_cp_dynamics_gradients(
-    dynamics: SkewCPQuadraticDynamics,
-    a_grad: np.ndarray,
-    skew_u_grad: np.ndarray,
-    skew_v_grad: np.ndarray,
-    skew_z_grad: np.ndarray,
-    b_grad: np.ndarray | None,
-    c_grad: np.ndarray,
-) -> dict[str, np.ndarray]:
-    gradients: dict[str, np.ndarray] = {
-        "a": a_grad,
-        "skew_u": skew_u_grad,
-        "skew_v": skew_v_grad,
-        "skew_z": skew_z_grad,
-        "c": c_grad,
-    }
-    if dynamics.b is not None:
-        if b_grad is None:
-            raise ValueError("b_grad must be provided when skew-CP dynamics has an input matrix b.")
-        gradients["b"] = b_grad
-    return gradients
-
-
 def _pullback_dynamics_gradients(
     dynamics: DynamicsLike,
     a_grad: np.ndarray,
@@ -234,12 +190,7 @@ def _pullback_dynamics_gradients(
     c_grad: np.ndarray,
 ) -> dict[str, np.ndarray]:
     gradients: dict[str, np.ndarray] = {"c": c_grad}
-    if isinstance(dynamics, SkewCPQuadraticDynamics):
-        skew_u_grad, skew_v_grad, skew_z_grad = dynamics.pullback_h_gradient_to_skew_cp(h_grad)
-        gradients["skew_u"] = skew_u_grad
-        gradients["skew_v"] = skew_v_grad
-        gradients["skew_z"] = skew_z_grad
-    elif not isinstance(dynamics, LinearDynamics):
+    if not isinstance(dynamics, LinearDynamics):
         gradients["mu_h"] = dynamics.pullback_h_gradient_to_mu_h(h_grad)
     if isinstance(dynamics, StabilizedQuadraticDynamics):
         s_grad, w_grad = dynamics.pullback_a_gradient_to_stabilized_params(a_grad)
@@ -403,45 +354,53 @@ def _rollout_result_to_loss_and_gradients(
         )
 
         a_grad = np.zeros((dynamics.dimension, dynamics.dimension), dtype=np.float64)
+        h_grad = np.zeros_like(dynamics.h_matrix, dtype=np.float64)
         c_grad = np.zeros(dynamics.dimension, dtype=np.float64)
         b_grad = None if getattr(dynamics, "b", None) is None else np.zeros_like(dynamics.b, dtype=np.float64)
-        if isinstance(dynamics, SkewCPQuadraticDynamics):
-            skew_u_grad = np.zeros_like(dynamics.skew_u, dtype=np.float64)
-            skew_v_grad = np.zeros_like(dynamics.skew_v, dtype=np.float64)
-            skew_z_grad = np.zeros_like(dynamics.skew_z, dtype=np.float64)
-        else:
-            h_grad = np.zeros_like(dynamics.h_matrix, dtype=np.float64)
 
         for n in range(rollout.accepted_steps):
-            dt = float(rollout.dt_history[n])
+            dt = rollout.dt_history[n]
             midpoint_state = 0.5 * (rollout.states[n] + rollout.states[n + 1])
-            midpoint_time = float(rollout.times[n] + 0.5 * dt)
+            midpoint_time = rollout.times[n] + 0.5 * dt
             lam = adjoints[n + 1]
-            p_mid = None
+            zeta = quadratic_features(midpoint_state)
+
+            a_grad += -dt * np.outer(lam, midpoint_state)
+            h_grad += -dt * np.outer(lam, zeta)
+            c_grad += -dt * lam
+
             if b_grad is not None and input_function is not None:
                 p_mid = np.asarray(input_function(midpoint_time), dtype=np.float64)
-
-            if isinstance(dynamics, SkewCPQuadraticDynamics):
-                _accumulate_skew_cp_parameter_gradients(
-                    dynamics=dynamics,
-                    state=midpoint_state,
-                    adjoint=lam,
-                    scale=-dt,
-                    a_grad=a_grad,
-                    skew_u_grad=skew_u_grad,
-                    skew_v_grad=skew_v_grad,
-                    skew_z_grad=skew_z_grad,
-                    b_grad=b_grad,
-                    c_grad=c_grad,
-                    input_vector=p_mid,
-                )
-            else:
-                zeta = quadratic_features(midpoint_state)
-                a_grad += -dt * np.outer(lam, midpoint_state)
-                h_grad += -dt * np.outer(lam, zeta)
-                c_grad += -dt * lam
-                if b_grad is not None and p_mid is not None:
-                    b_grad += -dt * np.outer(lam, p_mid)
+                b_grad += -dt * np.outer(lam, p_mid)
+    elif integrator == "lagged_midpoint":
+        adjoints = compute_lagged_midpoint_discrete_adjoint(
+            dynamics=dynamics,
+            states=rollout.states,
+            times=rollout.times,
+            dt_history=rollout.dt_history,
+            state_loss_gradients=full_state_loss_gradients,
+            input_function=input_function,
+        )
+        a_grad, h_grad, b_grad, c_grad = accumulate_lagged_midpoint_parameter_gradients(
+            dynamics=dynamics,
+            rollout=rollout,
+            adjoints=adjoints,
+            input_function=input_function,
+        )
+    elif integrator == "crank_nicolson":
+        adjoints = compute_crank_nicolson_discrete_adjoint(
+            dynamics=dynamics,
+            states=rollout.states,
+            times=rollout.times,
+            dt_history=rollout.dt_history,
+            state_loss_gradients=full_state_loss_gradients,
+        )
+        a_grad, h_grad, b_grad, c_grad = accumulate_crank_nicolson_parameter_gradients(
+            dynamics=dynamics,
+            rollout=rollout,
+            adjoints=adjoints,
+            input_function=input_function,
+        )
     elif integrator == "explicit_euler":
         adjoints = compute_explicit_euler_discrete_adjoint(
             dynamics=dynamics,
@@ -450,39 +409,13 @@ def _rollout_result_to_loss_and_gradients(
             dt_history=rollout.dt_history,
             state_loss_gradients=full_state_loss_gradients,
         )
-        if isinstance(dynamics, SkewCPQuadraticDynamics):
-            a_grad = np.zeros((dynamics.dimension, dynamics.dimension), dtype=np.float64)
-            skew_u_grad = np.zeros_like(dynamics.skew_u, dtype=np.float64)
-            skew_v_grad = np.zeros_like(dynamics.skew_v, dtype=np.float64)
-            skew_z_grad = np.zeros_like(dynamics.skew_z, dtype=np.float64)
-            c_grad = np.zeros(dynamics.dimension, dtype=np.float64)
-            b_grad = None if dynamics.b is None else np.zeros_like(dynamics.b, dtype=np.float64)
-            for step_idx in range(rollout.accepted_steps):
-                state = rollout.states[step_idx]
-                time = float(rollout.times[step_idx])
-                dt = float(rollout.dt_history[step_idx])
-                input_vector = None if input_function is None else np.asarray(input_function(time), dtype=np.float64)
-                _accumulate_skew_cp_parameter_gradients(
-                    dynamics=dynamics,
-                    state=state,
-                    adjoint=adjoints[step_idx + 1],
-                    scale=dt,
-                    a_grad=a_grad,
-                    skew_u_grad=skew_u_grad,
-                    skew_v_grad=skew_v_grad,
-                    skew_z_grad=skew_z_grad,
-                    b_grad=b_grad,
-                    c_grad=c_grad,
-                    input_vector=input_vector,
-                )
-        else:
-            a_grad, h_grad, b_grad, c_grad = accumulate_explicit_euler_parameter_gradients(
-                dynamics=dynamics,
-                rollout=rollout,
-                adjoints=adjoints,
-                input_function=input_function,
-            )
-    elif integrator == "rk4":
+        a_grad, h_grad, b_grad, c_grad = accumulate_explicit_euler_parameter_gradients(
+            dynamics=dynamics,
+            rollout=rollout,
+            adjoints=adjoints,
+            input_function=input_function,
+        )
+    else:
         adjoints = compute_rk4_discrete_adjoint(
             dynamics=dynamics,
             states=rollout.states,
@@ -491,50 +424,14 @@ def _rollout_result_to_loss_and_gradients(
             state_loss_gradients=full_state_loss_gradients,
             input_function=input_function,
         )
-        if isinstance(dynamics, SkewCPQuadraticDynamics):
-            a_grad, skew_u_grad, skew_v_grad, skew_z_grad, b_grad, c_grad = accumulate_rk4_skew_cp_parameter_gradients(
-                dynamics=dynamics,
-                rollout=rollout,
-                adjoints=adjoints,
-                input_function=input_function,
-            )
-        else:
-            a_grad, h_grad, b_grad, c_grad = accumulate_rk4_parameter_gradients(
-                dynamics=dynamics,
-                rollout=rollout,
-                adjoints=adjoints,
-                input_function=input_function,
-            )
-    else:
-        if isinstance(dynamics, SkewCPQuadraticDynamics):
-            raise NotImplementedError("skew_lagged_midpoint adjoint is implemented for compressed quadratic dynamics.")
-        adjoints = compute_skew_lagged_midpoint_discrete_adjoint(
-            dynamics=dynamics,
-            states=rollout.states,
-            times=rollout.times,
-            dt_history=rollout.dt_history,
-            state_loss_gradients=full_state_loss_gradients,
-            input_function=input_function,
-        )
-        a_grad, h_grad, b_grad, c_grad = accumulate_skew_lagged_midpoint_parameter_gradients(
+        a_grad, h_grad, b_grad, c_grad = accumulate_rk4_parameter_gradients(
             dynamics=dynamics,
             rollout=rollout,
             adjoints=adjoints,
             input_function=input_function,
         )
 
-    if isinstance(dynamics, SkewCPQuadraticDynamics):
-        dynamics_gradients = _pack_skew_cp_dynamics_gradients(
-            dynamics=dynamics,
-            a_grad=a_grad,
-            skew_u_grad=skew_u_grad,
-            skew_v_grad=skew_v_grad,
-            skew_z_grad=skew_z_grad,
-            b_grad=b_grad,
-            c_grad=c_grad,
-        )
-    else:
-        dynamics_gradients = _pullback_dynamics_gradients(dynamics, a_grad, h_grad, b_grad, c_grad)
+    dynamics_gradients = _pullback_dynamics_gradients(dynamics, a_grad, h_grad, b_grad, c_grad)
 
     return RolloutLossGradientResult(
         rollout=rollout,
