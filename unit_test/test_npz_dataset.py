@@ -28,6 +28,13 @@ class NpzDatasetTest(unittest.TestCase):
         values = np.array([[0.0, 1.0], [1.0, -1.0], [0.5, 0.5]], dtype=float)
         input_function = build_piecewise_linear_input_function(times, values)
         np.testing.assert_allclose(input_function(0.25), np.array([0.5, 0.0]))
+        p0, pq, pm = input_function.sample_lagged_midpoint_inputs(  # type: ignore[attr-defined]
+            np.array([0.0, 0.5, 1.0], dtype=float),
+            np.array([0.5, 0.5], dtype=float),
+        )
+        np.testing.assert_allclose(p0[0], input_function(0.0))
+        np.testing.assert_allclose(pq[0], input_function(0.125))
+        np.testing.assert_allclose(pm[0], input_function(0.25))
 
     def test_build_cubic_spline_input_function_matches_scipy_reference(self) -> None:
         times = np.array([0.0, 0.2, 0.7, 1.0], dtype=float)
@@ -45,6 +52,13 @@ class NpzDatasetTest(unittest.TestCase):
 
         for t in [0.0, 0.15, 0.45, 0.85, 1.0]:
             np.testing.assert_allclose(input_function(t), np.asarray(reference(t), dtype=float))
+        p0, pq, pm = input_function.sample_lagged_midpoint_inputs(  # type: ignore[attr-defined]
+            np.array([0.0, 0.4, 1.0], dtype=float),
+            np.array([0.4, 0.6], dtype=float),
+        )
+        np.testing.assert_allclose(p0[1], np.asarray(reference(0.4), dtype=float))
+        np.testing.assert_allclose(pq[1], np.asarray(reference(0.55), dtype=float))
+        np.testing.assert_allclose(pm[1], np.asarray(reference(0.7), dtype=float))
 
     def test_load_sample_and_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

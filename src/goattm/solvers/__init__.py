@@ -40,6 +40,7 @@ from .lagged_midpoint import (
     lagged_midpoint_step,
     lagged_midpoint_step_with_cache,
     rollout_lagged_midpoint,
+    rollout_lagged_midpoint_explicit_parameter_tangent_from_base_rollout,
     rollout_lagged_midpoint_tangent_from_base_rollout,
     rollout_lagged_midpoint_to_observation_times,
 )
@@ -106,6 +107,7 @@ __all__ = [
     "rollout_crank_nicolson_tangent_from_base_rollout",
     "rollout_crank_nicolson_to_observation_times",
     "rollout_lagged_midpoint",
+    "rollout_lagged_midpoint_explicit_parameter_tangent_from_base_rollout",
     "rollout_lagged_midpoint_tangent_from_base_rollout",
     "rollout_lagged_midpoint_to_observation_times",
     "rollout_skew_lagged_midpoint",

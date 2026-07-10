@@ -103,6 +103,46 @@ def _rhs_numba(a: np.ndarray, h: np.ndarray, b: np.ndarray, c: np.ndarray, u: np
 
 
 @njit(cache=True)
+def _rhs_parameter_action_numba(delta_a: np.ndarray, delta_h: np.ndarray, delta_b: np.ndarray, delta_c: np.ndarray, u: np.ndarray, p: np.ndarray) -> np.ndarray:
+    r = u.shape[0]
+    out = np.zeros(r, dtype=np.float64)
+    for row in range(r):
+        acc = delta_c[row]
+        for j in range(r):
+            acc += delta_a[row, j] * u[j]
+        idx = 0
+        for i in range(r):
+            for j in range(i + 1):
+                acc += delta_h[row, idx] * u[i] * u[j]
+                idx += 1
+        for j in range(p.shape[0]):
+            acc += delta_b[row, j] * p[j]
+        out[row] = acc
+    return out
+
+
+@njit(cache=True)
+def _rhs_jacobian_action_numba(a: np.ndarray, h: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
+    r = u.shape[0]
+    out = np.zeros(r, dtype=np.float64)
+    for row in range(r):
+        acc = 0.0
+        for col in range(r):
+            acc += a[row, col] * v[col]
+        idx = 0
+        for i in range(r):
+            for j in range(i + 1):
+                coeff = h[row, idx]
+                if i == j:
+                    acc += 2.0 * coeff * u[i] * v[i]
+                else:
+                    acc += coeff * (u[j] * v[i] + u[i] * v[j])
+                idx += 1
+        out[row] = acc
+    return out
+
+
+@njit(cache=True)
 def _rhs_jacobian_transpose_action_numba(a: np.ndarray, h: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
     r = u.shape[0]
     out = np.zeros(r, dtype=np.float64)
@@ -157,6 +197,43 @@ def _rk4_half_predictor_numba(a: np.ndarray, h: np.ndarray, b: np.ndarray, c: np
 
 
 @njit(cache=True)
+def _rk4_half_tangent_numba(
+    a: np.ndarray,
+    h: np.ndarray,
+    b: np.ndarray,
+    c: np.ndarray,
+    delta_a: np.ndarray,
+    delta_h: np.ndarray,
+    delta_b: np.ndarray,
+    delta_c: np.ndarray,
+    state: np.ndarray,
+    state_tangent: np.ndarray,
+    dt: float,
+    p0: np.ndarray,
+    pq: np.ndarray,
+    pm: np.ndarray,
+) -> np.ndarray:
+    half_dt = 0.5 * dt
+    k1 = _rhs_numba(a, h, b, c, state, p0)
+    # The tangent stages need the base RK stage states; recomputing them here
+    # keeps this kernel independent from Python-side stage-cache objects.
+    y2 = state + 0.5 * half_dt * k1
+    k2_base = _rhs_numba(a, h, b, c, y2, pq)
+    y3 = state + 0.5 * half_dt * k2_base
+    k3_base = _rhs_numba(a, h, b, c, y3, pq)
+    y4 = state + half_dt * k3_base
+
+    dk1 = _rhs_jacobian_action_numba(a, h, state, state_tangent) + _rhs_parameter_action_numba(delta_a, delta_h, delta_b, delta_c, state, p0)
+    dy2 = state_tangent + 0.5 * half_dt * dk1
+    dk2 = _rhs_jacobian_action_numba(a, h, y2, dy2) + _rhs_parameter_action_numba(delta_a, delta_h, delta_b, delta_c, y2, pq)
+    dy3 = state_tangent + 0.5 * half_dt * dk2
+    dk3 = _rhs_jacobian_action_numba(a, h, y3, dy3) + _rhs_parameter_action_numba(delta_a, delta_h, delta_b, delta_c, y3, pq)
+    dy4 = state_tangent + half_dt * dk3
+    dk4 = _rhs_jacobian_action_numba(a, h, y4, dy4) + _rhs_parameter_action_numba(delta_a, delta_h, delta_b, delta_c, y4, pm)
+    return state_tangent + (half_dt / 6.0) * (dk1 + 2.0 * dk2 + 2.0 * dk3 + dk4)
+
+
+@njit(cache=True)
 def _lagged_midpoint_step_numba(a: np.ndarray, h: np.ndarray, b: np.ndarray, c: np.ndarray, state: np.ndarray, dt: float, p0: np.ndarray, pq: np.ndarray, pm: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     predictor, _, _, _ = _rk4_half_predictor_numba(a, h, b, c, state, dt, p0, pq, pm)
     linear_operator = a + _bilinear_action_numba(h, predictor)
@@ -195,6 +272,66 @@ def rollout_lagged_midpoint_presampled_kernel(a: np.ndarray, h: np.ndarray, b: n
         states[step + 1, :] = next_state
         accepted += 1
     return success, accepted, states
+
+
+@njit(cache=True)
+def rollout_lagged_midpoint_explicit_parameter_tangent_presampled_kernel(
+    a: np.ndarray,
+    h: np.ndarray,
+    b: np.ndarray,
+    c: np.ndarray,
+    delta_a: np.ndarray,
+    delta_h: np.ndarray,
+    delta_b: np.ndarray,
+    delta_c: np.ndarray,
+    states: np.ndarray,
+    dt_history: np.ndarray,
+    p0_values: np.ndarray,
+    pq_values: np.ndarray,
+    pm_values: np.ndarray,
+) -> np.ndarray:
+    n_steps = dt_history.shape[0]
+    r = states.shape[1]
+    tangent_states = np.zeros_like(states)
+    current_tangent = np.zeros(r, dtype=np.float64)
+    identity = np.eye(r, dtype=np.float64)
+    for step in range(n_steps):
+        state = states[step]
+        next_state = states[step + 1]
+        dt = dt_history[step]
+        half_dt = 0.5 * dt
+        predictor, _, _, _ = _rk4_half_predictor_numba(a, h, b, c, state, dt, p0_values[step], pq_values[step], pm_values[step])
+        predictor_tangent = _rk4_half_tangent_numba(
+        a,
+        h,
+        b,
+        c,
+        delta_a,
+        delta_h,
+            delta_b,
+            delta_c,
+            state,
+            current_tangent,
+            dt,
+            p0_values[step],
+            pq_values[step],
+            pm_values[step],
+        )
+        linear_operator = a + _bilinear_action_numba(h, predictor)
+        linear_operator_tangent = _bilinear_action_numba(h, predictor_tangent) + delta_a + _bilinear_action_numba(delta_h, predictor)
+
+        forcing_tangent = delta_c.copy()
+        for row in range(r):
+            for col in range(pm_values.shape[1]):
+                forcing_tangent[row] += delta_b[row, col] * pm_values[step, col]
+
+        system = identity - half_dt * linear_operator
+        rhs_tangent = (identity + half_dt * linear_operator) @ current_tangent
+        rhs_tangent += half_dt * (linear_operator_tangent @ (state + next_state))
+        rhs_tangent += dt * forcing_tangent
+        current_tangent = np.linalg.solve(system, rhs_tangent)
+        tangent_states[step + 1, :] = current_tangent
+    return tangent_states
 
 
 @njit(cache=True)

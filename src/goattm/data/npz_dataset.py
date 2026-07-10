@@ -238,6 +238,15 @@ def build_piecewise_linear_input_function(times: np.ndarray, values: np.ndarray)
     def input_function(t: float) -> np.ndarray:
         return np.asarray([np.interp(t, grid, table[:, j]) for j in range(table.shape[1])], dtype=np.float64)
 
+    def sample_lagged_midpoint_inputs(times: np.ndarray, dt_history: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        step_times = np.asarray(times[:-1], dtype=np.float64)
+        dt = np.asarray(dt_history, dtype=np.float64)
+        p0 = np.column_stack([np.interp(step_times, grid, table[:, j]) for j in range(table.shape[1])])
+        pq = np.column_stack([np.interp(step_times + 0.25 * dt, grid, table[:, j]) for j in range(table.shape[1])])
+        pm = np.column_stack([np.interp(step_times + 0.5 * dt, grid, table[:, j]) for j in range(table.shape[1])])
+        return p0.astype(np.float64, copy=False), pq.astype(np.float64, copy=False), pm.astype(np.float64, copy=False)
+
+    input_function.sample_lagged_midpoint_inputs = sample_lagged_midpoint_inputs  # type: ignore[attr-defined]
     return input_function
 
 
@@ -256,6 +265,15 @@ def build_cubic_spline_input_function(times: np.ndarray, values: np.ndarray) -> 
     def input_function(t: float) -> np.ndarray:
         return np.asarray(spline(float(t)), dtype=np.float64)
 
+    def sample_lagged_midpoint_inputs(times: np.ndarray, dt_history: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        step_times = np.asarray(times[:-1], dtype=np.float64)
+        dt = np.asarray(dt_history, dtype=np.float64)
+        p0 = np.asarray(spline(step_times), dtype=np.float64)
+        pq = np.asarray(spline(step_times + 0.25 * dt), dtype=np.float64)
+        pm = np.asarray(spline(step_times + 0.5 * dt), dtype=np.float64)
+        return p0, pq, pm
+
+    input_function.sample_lagged_midpoint_inputs = sample_lagged_midpoint_inputs  # type: ignore[attr-defined]
     return input_function
 
 

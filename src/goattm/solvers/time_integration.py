@@ -175,6 +175,8 @@ def rollout_tangent_from_base_rollout(
     parameter_action: Callable[[np.ndarray, float], np.ndarray] | None = None,
     input_function: Callable[[float], np.ndarray] | None = None,
     time_integrator: TimeIntegrator = "implicit_midpoint",
+    parameter_linear_operator_action: Callable[[np.ndarray, float], np.ndarray] | None = None,
+    forcing_parameter_action: Callable[[float], np.ndarray] | None = None,
 ) -> np.ndarray:
     integrator = validate_time_integrator(time_integrator)
     if integrator == "implicit_midpoint":
@@ -195,6 +197,8 @@ def rollout_tangent_from_base_rollout(
             base_rollout=base_rollout,
             parameter_action=parameter_action,
             input_function=input_function,
+            parameter_linear_operator_action=parameter_linear_operator_action,
+            forcing_parameter_action=forcing_parameter_action,
         )
     if integrator == "explicit_euler":
         return rollout_explicit_euler_tangent_from_base_rollout(

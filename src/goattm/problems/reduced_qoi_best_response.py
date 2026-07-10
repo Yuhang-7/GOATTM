@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
 import numpy as np
+
+try:
+    from scipy.linalg import cho_factor, cho_solve, lu_factor, lu_solve
+except Exception:  # pragma: no cover - SciPy is available on the research clusters, but keep a NumPy fallback.
+    cho_factor = cho_solve = lu_factor = lu_solve = None
 
 from goattm.core.parametrization import (
     compressed_h_gradient_to_mu_h,
@@ -15,11 +20,12 @@ from goattm.core.parametrization import (
     s_params_to_matrix,
     w_params_to_matrix,
 )
-from goattm.core.quadratic import quadratic_jacobian_matrix
+from goattm.core.quadratic import quadratic_bilinear_action_matrix, quadratic_jacobian_matrix
 from goattm.data.npz_dataset import NpzQoiSample, NpzSampleManifest, load_npz_qoi_sample, load_npz_sample_manifest
 from goattm.losses import rollout_qoi_loss_and_gradients_from_cached_observation_rollout
 from goattm.losses.qoi_loss import compute_midpoint_discrete_adjoint, qoi_trajectory_loss, trapezoidal_rule_weights_from_times
 from goattm.models.linear_dynamics import LinearDynamics
+from goattm.models.general_quadratic_dynamics import GeneralQuadraticDynamics
 from goattm.models.quadratic_decoder import QuadraticDecoder
 from goattm.models.quadratic_dynamics import QuadraticDynamics
 from goattm.models.skew_cp_quadratic_dynamics import SkewCPQuadraticDynamics
@@ -40,23 +46,26 @@ from goattm.solvers import (
     TimeIntegrator,
     accumulate_explicit_euler_parameter_gradients,
     accumulate_explicit_euler_parameter_hessian_action_terms,
+    accumulate_lagged_midpoint_parameter_gradients,
     accumulate_rk4_parameter_gradients,
     accumulate_rk4_parameter_hessian_action_terms,
     accumulate_skew_lagged_midpoint_parameter_gradients,
     accumulate_skew_lagged_midpoint_parameter_hessian_action_terms,
     compute_explicit_euler_discrete_adjoint,
     compute_explicit_euler_incremental_discrete_adjoint,
+    compute_lagged_midpoint_discrete_adjoint,
     compute_rk4_discrete_adjoint,
     compute_rk4_incremental_discrete_adjoint,
     compute_skew_lagged_midpoint_discrete_adjoint,
     compute_skew_lagged_midpoint_incremental_discrete_adjoint,
+    rollout_lagged_midpoint_explicit_parameter_tangent_from_base_rollout,
     rollout_tangent_from_base_rollout,
     rollout_to_observation_times,
     validate_time_integrator,
 )
 
 
-DynamicsLike = LinearDynamics | QuadraticDynamics | SkewCPQuadraticDynamics | StabilizedQuadraticDynamics
+DynamicsLike = LinearDynamics | GeneralQuadraticDynamics | QuadraticDynamics | SkewCPQuadraticDynamics | StabilizedQuadraticDynamics
 
 
 @dataclass(frozen=True)
@@ -64,6 +73,7 @@ class DynamicsParameterDirection:
     mu_h: np.ndarray
     c: np.ndarray
     a: np.ndarray | None = None
+    h_matrix: np.ndarray | None = None
     s_params: np.ndarray | None = None
     w_params: np.ndarray | None = None
     skew_u: np.ndarray | None = None
@@ -95,6 +105,21 @@ class ForwardRolloutCacheEntry:
     global_sample_count: int
 
 
+@dataclass(frozen=True)
+class DecoderNormalMatrixFactorization:
+    """Root-rank factorization of the regularized decoder normal matrix.
+
+    The decoder normal matrix is fixed for a prepared dynamics state. Lanczos
+    and other matrix-free eigensolvers apply many Schur-complement Hessian
+    actions at that same state, so refactorizing the matrix in every action is
+    pure overhead. Non-root ranks hold ``None`` for the factor object and only
+    participate in the final broadcast of the solved decoder increment.
+    """
+
+    method: str
+    factor: object
+
+
 @dataclass
 class ForwardRolloutFailure(RuntimeError):
     sample_index: int
@@ -120,6 +145,7 @@ class DecoderBestResponseContext:
     decoder: QuadraticDecoder
     system: DecoderNormalEquationSystem
     forward_cache: ForwardRolloutCacheEntry
+    normal_factorization: DecoderNormalMatrixFactorization | None = None
 
 
 @dataclass(frozen=True)
@@ -166,6 +192,25 @@ class ReducedHessianActionResult:
     direction: np.ndarray
     action: np.ndarray
     decoder_direction: QuadraticDecoder
+
+
+@dataclass(frozen=True)
+class ReducedGaussNewtonHessianActionResult:
+    base_state: ReducedObjectivePreparedState
+    direction: np.ndarray
+    action: np.ndarray
+    decoder_direction: QuadraticDecoder
+    projected_residual_tangent_norm_sq: float
+    decoder_regularization_tangent_norm_sq: float
+    dynamics_regularization_tangent_norm_sq: float
+
+    @property
+    def quadratic_form(self) -> float:
+        return (
+            self.projected_residual_tangent_norm_sq
+            + self.decoder_regularization_tangent_norm_sq
+            + self.dynamics_regularization_tangent_norm_sq
+        )
 
 
 @dataclass(frozen=True)
@@ -304,6 +349,32 @@ class ReducedObjectiveWorkflow:
         direction: np.ndarray,
     ) -> ReducedHessianActionResult:
         return self.evaluator.evaluate_reduced_objective_hessian_action(
+            prepared_state=prepared_state,
+            decoder_template=self.decoder_template,
+            regularization=self.regularization,
+            dynamics_regularization=self.dynamics_regularization,
+            direction=direction,
+            solve_root=self.solve_root,
+        )
+
+    @timed("goattm.problems.ReducedObjectiveWorkflow.evaluate_gauss_newton_hessian_action")
+    def evaluate_gauss_newton_hessian_action(
+        self,
+        dynamics: DynamicsLike,
+        direction: np.ndarray,
+    ) -> ReducedGaussNewtonHessianActionResult:
+        return self.evaluate_gauss_newton_hessian_action_from_prepared_state(
+            prepared_state=self.prepare(dynamics),
+            direction=direction,
+        )
+
+    @timed("goattm.problems.ReducedObjectiveWorkflow.evaluate_gauss_newton_hessian_action_from_prepared_state")
+    def evaluate_gauss_newton_hessian_action_from_prepared_state(
+        self,
+        prepared_state: ReducedObjectivePreparedState,
+        direction: np.ndarray,
+    ) -> ReducedGaussNewtonHessianActionResult:
+        return self.evaluator.evaluate_reduced_gauss_newton_hessian_action(
             prepared_state=prepared_state,
             decoder_template=self.decoder_template,
             regularization=self.regularization,
@@ -532,12 +603,14 @@ class ObservationAlignedBestResponseEvaluator:
             local_sample_ids=forward_cache.local_sample_ids,
         )
         solve_result = solve_decoder_linear_system(system=system, context=self.context, solve_root=solve_root)
+        normal_factorization = factorize_decoder_normal_matrix(solve_result.system, self.context, solve_root=solve_root)
         best_response = DecoderBestResponseContext(
             dynamics_key=forward_cache.dynamics_key,
             regularization=regularization,
             decoder=solve_result.decoder,
-            system=system,
+            system=solve_result.system,
             forward_cache=forward_cache,
+            normal_factorization=normal_factorization,
         )
         self._best_response_cache_key = cache_key
         self._best_response_cache = best_response
@@ -694,16 +767,10 @@ class ObservationAlignedBestResponseEvaluator:
         total_dynamics_gradients = _zero_dynamics_gradients(dynamics)
         local_rollouts = self.get_forward_rollouts(dynamics).local_rollouts
         for rollout_entry in local_rollouts:
-            tangent_states = rollout_tangent_from_base_rollout(
+            tangent_states = rollout_dynamics_parameter_tangent_from_base_rollout(
                 dynamics=dynamics,
+                direction=dynamics_direction,
                 base_rollout=rollout_entry.rollout,
-                parameter_action=lambda midpoint_state, midpoint_time, input_function=rollout_entry.input_function: rhs_parameter_action(  # noqa: E731
-                    dynamics,
-                    dynamics_direction,
-                    midpoint_state,
-                    midpoint_time,
-                    input_function=input_function,
-                ),
                 input_function=rollout_entry.input_function,
                 time_integrator=self.time_integrator,
             )
@@ -875,16 +942,10 @@ class ObservationAlignedBestResponseEvaluator:
         local_action = np.zeros((feature_dim, decoder.output_dimension), dtype=np.float64)
 
         for rollout_entry in forward_cache.local_rollouts:
-            tangent_states = rollout_tangent_from_base_rollout(
+            tangent_states = rollout_dynamics_parameter_tangent_from_base_rollout(
                 dynamics=dynamics,
+                direction=direction,
                 base_rollout=rollout_entry.rollout,
-                parameter_action=lambda midpoint_state, midpoint_time, input_function=rollout_entry.input_function: rhs_parameter_action(  # noqa: E731
-                    dynamics,
-                    direction,
-                    midpoint_state,
-                    midpoint_time,
-                    input_function=input_function,
-                ),
                 input_function=rollout_entry.input_function,
                 time_integrator=self.time_integrator,
             )
@@ -925,7 +986,206 @@ class ObservationAlignedBestResponseEvaluator:
             solve_root=solve_root,
         )
         mixed_action = self.compute_decoder_mixed_hessian_action(dynamics, best_response.decoder, direction)
-        return solve_decoder_best_response_action_matrix(best_response.system, mixed_action, self.context, solve_root=solve_root)
+        return solve_decoder_best_response_action_matrix(
+            best_response.system,
+            mixed_action,
+            self.context,
+            solve_root=solve_root,
+            factorization=best_response.normal_factorization,
+        )
+
+    @timed("goattm.problems.ObservationAlignedBestResponseEvaluator.compute_decoder_gauss_newton_mixed_action")
+    def compute_decoder_gauss_newton_mixed_action(
+        self,
+        dynamics: DynamicsLike,
+        decoder: QuadraticDecoder,
+        direction: DynamicsParameterDirection,
+    ) -> np.ndarray:
+        """Assemble the GN cross block J_decoder^T W J_dynamics direction.
+
+        This intentionally omits residual-weighted derivatives of the decoder
+        normal equation. Those terms belong to the exact reduced Hessian. The
+        Schur/GN metric only sees the linearized residual
+
+            decoder.jacobian(u) @ du + decoder_direction.decode(u).
+        """
+        forward_cache = self.get_forward_rollouts(dynamics)
+        feature_dim = decoder_feature_dimension(dynamics.dimension, decoder.form)
+        local_action = np.zeros((feature_dim, decoder.output_dimension), dtype=np.float64)
+
+        for rollout_entry in forward_cache.local_rollouts:
+            tangent_states = rollout_dynamics_parameter_tangent_from_base_rollout(
+                dynamics=dynamics,
+                direction=direction,
+                base_rollout=rollout_entry.rollout,
+                input_function=rollout_entry.input_function,
+                time_integrator=self.time_integrator,
+            )
+            observed_tangents = tangent_states[rollout_entry.observation_indices]
+            for state, state_tangent, weight in zip(
+                rollout_entry.observed_states,
+                observed_tangents,
+                rollout_entry.observation_weights,
+            ):
+                phi = decoder_feature_vector(state, decoder.form)
+                theta_residual_tangent = decoder.jacobian(state) @ state_tangent
+                local_action += float(weight) * np.outer(phi, theta_residual_tangent)
+
+        self.increment_solve_count("tangent_forward", len(forward_cache.local_rollouts))
+        return self.context.allreduce_array_sum(local_action)
+
+    @timed("goattm.problems.ObservationAlignedBestResponseEvaluator.compute_decoder_gauss_newton_schur_action")
+    def compute_decoder_gauss_newton_schur_action(
+        self,
+        dynamics: DynamicsLike,
+        decoder_template: QuadraticDecoder,
+        regularization: DecoderTikhonovRegularization,
+        direction: DynamicsParameterDirection,
+        solve_root: int = 0,
+    ) -> np.ndarray:
+        """Solve for the decoder increment used by the VarPro GN Schur metric.
+
+        The equation is
+
+            (J_D^T W J_D + R_D) dD = - J_D^T W J_theta dtheta.
+
+        Compare with compute_decoder_best_response_action: that routine
+        differentiates the full best-response normal equation and includes
+        residual-weighted terms. This routine is only for the linearized
+        least-squares/Gauss-Newton model.
+        """
+        best_response = self.solve_decoder_best_response(
+            dynamics=dynamics,
+            decoder_template=decoder_template,
+            regularization=regularization,
+            solve_root=solve_root,
+        )
+        mixed_action = self.compute_decoder_gauss_newton_mixed_action(dynamics, best_response.decoder, direction)
+        return solve_decoder_best_response_action_matrix(
+            best_response.system,
+            mixed_action,
+            self.context,
+            solve_root=solve_root,
+            factorization=best_response.normal_factorization,
+        )
+
+    @timed("goattm.problems.ObservationAlignedBestResponseEvaluator.evaluate_reduced_gauss_newton_hessian_action")
+    def evaluate_reduced_gauss_newton_hessian_action(
+        self,
+        prepared_state: ReducedObjectivePreparedState,
+        decoder_template: QuadraticDecoder,
+        regularization: DecoderTikhonovRegularization | None,
+        dynamics_regularization: DynamicsTikhonovRegularization | None,
+        direction: np.ndarray,
+        solve_root: int = 0,
+    ) -> ReducedGaussNewtonHessianActionResult:
+        """Apply the VarPro/Schur Gauss-Newton metric to a dynamics direction.
+
+        This computes the reduced linearized least-squares curvature
+
+            G_vp = J_theta^T (I - P_D) J_theta
+
+        with the regularized decoder normal matrix when decoder Tikhonov terms
+        are present. It is not the exact Hessian of the reduced objective.
+        """
+        if regularization is None:
+            regularization = DecoderTikhonovRegularization()
+        if dynamics_regularization is None:
+            dynamics_regularization = DynamicsTikhonovRegularization()
+        direction_vector = np.asarray(direction, dtype=np.float64).reshape(-1)
+        base_vector = dynamics_parameter_vector(prepared_state.dynamics)
+        if direction_vector.shape != base_vector.shape:
+            raise ValueError(f"direction must have shape {base_vector.shape}, got {direction_vector.shape}")
+
+        dynamics_direction = unpack_dynamics_parameter_vector(prepared_state.dynamics, direction_vector)
+        best_response = prepared_state.result.best_response_context
+        _ = decoder_template
+        feature_dim = decoder_feature_dimension(prepared_state.dynamics.dimension, best_response.decoder.form)
+        local_mixed_action = np.zeros((feature_dim, best_response.decoder.output_dimension), dtype=np.float64)
+        local_rollouts = best_response.forward_cache.local_rollouts
+        tangent_rollouts: list[np.ndarray] = []
+        for rollout_entry in local_rollouts:
+            tangent_states = rollout_dynamics_parameter_tangent_from_base_rollout(
+                dynamics=prepared_state.dynamics,
+                direction=dynamics_direction,
+                base_rollout=rollout_entry.rollout,
+                input_function=rollout_entry.input_function,
+                time_integrator=self.time_integrator,
+            )
+            tangent_rollouts.append(tangent_states)
+            observed_tangents = tangent_states[rollout_entry.observation_indices]
+            for state, state_tangent, weight in zip(
+                rollout_entry.observed_states,
+                observed_tangents,
+                rollout_entry.observation_weights,
+            ):
+                phi = decoder_feature_vector(state, best_response.decoder.form)
+                theta_residual_tangent = best_response.decoder.jacobian(state) @ state_tangent
+                local_mixed_action += float(weight) * np.outer(phi, theta_residual_tangent)
+
+        self.increment_solve_count("tangent_forward", len(local_rollouts))
+        mixed_action = self.context.allreduce_array_sum(local_mixed_action)
+        decoder_action_matrix = solve_decoder_best_response_action_matrix(
+            best_response.system,
+            mixed_action,
+            self.context,
+            solve_root=solve_root,
+            factorization=best_response.normal_factorization,
+        )
+        decoder_direction = matrix_to_decoder(
+            prepared_state.dynamics.dimension,
+            best_response.decoder.output_dimension,
+            decoder_action_matrix,
+        )
+
+        total_dynamics_gradients = _zero_dynamics_gradients(prepared_state.dynamics)
+        projected_residual_tangent_norm_sq = 0.0
+        for rollout_entry, tangent_states in zip(local_rollouts, tangent_rollouts, strict=True):
+            observed_tangents = tangent_states[rollout_entry.observation_indices]
+            state_loss_gradients = np.zeros_like(rollout_entry.rollout.states, dtype=np.float64)
+            for local_idx, global_idx in enumerate(rollout_entry.observation_indices):
+                state = rollout_entry.rollout.states[global_idx]
+                state_tangent = observed_tangents[local_idx]
+                weight = float(rollout_entry.observation_weights[local_idx])
+                projected_tangent = best_response.decoder.jacobian(state) @ state_tangent + decoder_direction.decode(state)
+                projected_residual_tangent_norm_sq += weight * float(np.dot(projected_tangent, projected_tangent))
+                state_loss_gradients[global_idx] = best_response.decoder.jacobian(state).T @ (weight * projected_tangent)
+
+            sample_gradients = _dynamics_gradients_from_state_loss_gradients(
+                dynamics=prepared_state.dynamics,
+                rollout=rollout_entry.rollout,
+                state_loss_gradients=state_loss_gradients,
+                input_function=rollout_entry.input_function,
+                time_integrator=self.time_integrator,
+            )
+            for key, value in sample_gradients.items():
+                total_dynamics_gradients[key] += value
+
+        self.increment_solve_count("adjoint", len(local_rollouts))
+        dynamics_action = pack_dynamics_gradient_vector(
+            prepared_state.dynamics,
+            sum_array_mapping(total_dynamics_gradients, self.context),
+        )
+        dynamics_reg_action = dynamics_regularization_hessian_action(
+            prepared_state.dynamics,
+            dynamics_regularization,
+            direction_vector,
+        )
+        action = dynamics_action + dynamics_reg_action
+        projected_residual_tangent_norm_sq = self.context.allreduce_scalar_sum(projected_residual_tangent_norm_sq)
+        decoder_regularization_tangent_norm_sq = float(
+            np.sum(decoder_regularization_hessian_action_matrix(best_response.decoder, regularization, decoder_action_matrix) * decoder_action_matrix)
+        )
+        dynamics_regularization_tangent_norm_sq = float(np.dot(direction_vector, dynamics_reg_action))
+        return ReducedGaussNewtonHessianActionResult(
+            base_state=prepared_state,
+            direction=direction_vector.copy(),
+            action=action,
+            decoder_direction=decoder_direction,
+            projected_residual_tangent_norm_sq=projected_residual_tangent_norm_sq,
+            decoder_regularization_tangent_norm_sq=decoder_regularization_tangent_norm_sq,
+            dynamics_regularization_tangent_norm_sq=dynamics_regularization_tangent_norm_sq,
+        )
 
     @timed("goattm.problems.ObservationAlignedBestResponseEvaluator.evaluate_reduced_data_loss_and_gradient")
     def evaluate_reduced_data_loss_and_gradient(
@@ -1094,16 +1354,10 @@ class ObservationAlignedBestResponseEvaluator:
             raise RuntimeError("Forward rollout cache and local sample results are misaligned.")
 
         for rollout_entry, sample_result in zip(local_rollouts, local_results):
-            tangent_states = rollout_tangent_from_base_rollout(
+            tangent_states = rollout_dynamics_parameter_tangent_from_base_rollout(
                 dynamics=prepared_state.dynamics,
+                direction=dynamics_direction,
                 base_rollout=rollout_entry.rollout,
-                parameter_action=lambda midpoint_state, midpoint_time, input_function=rollout_entry.input_function: rhs_parameter_action(  # noqa: E731
-                    prepared_state.dynamics,
-                    dynamics_direction,
-                    midpoint_state,
-                    midpoint_time,
-                    input_function=input_function,
-                ),
                 input_function=rollout_entry.input_function,
                 time_integrator=self.time_integrator,
             )
@@ -1467,7 +1721,63 @@ def solve_decoder_linear_system(
         solution_matrix = np.linalg.solve(regularized_normal_matrix, global_rhs)
     solution_matrix = context.bcast_array(solution_matrix, root=solve_root)
     decoder = matrix_to_decoder(system.latent_dimension, system.output_dimension, solution_matrix)
-    return DecoderNormalEquationSolveResult(decoder=decoder, system=system, solution_matrix=solution_matrix)
+    solved_system = replace(
+        system,
+        global_normal_matrix=global_normal_matrix,
+        global_rhs=global_rhs,
+        global_normal_matrix_cached=True,
+    )
+    return DecoderNormalEquationSolveResult(decoder=decoder, system=solved_system, solution_matrix=solution_matrix)
+
+
+def factorize_decoder_normal_matrix(
+    system: DecoderNormalEquationSystem,
+    context: DistributedContext,
+    solve_root: int = 0,
+) -> DecoderNormalMatrixFactorization | None:
+    """Factor the fixed decoder normal matrix on the solve root.
+
+    The normal matrix is symmetric positive definite after the decoder
+    regularization in the intended VarPro workflow. We try Cholesky first and
+    fall back to LU or a raw matrix solve if the matrix is only nonsingular.
+    """
+
+    if context.rank != solve_root:
+        return None
+    if system.global_normal_matrix is None:
+        raise RuntimeError("Root rank does not have the global decoder normal matrix to factor.")
+    regularized_normal_matrix = system.global_normal_matrix + np.diag(system.regularization_diagonal)
+    if cho_factor is not None and cho_solve is not None:
+        try:
+            return DecoderNormalMatrixFactorization(
+                method="cholesky",
+                factor=cho_factor(regularized_normal_matrix, lower=True, check_finite=False),
+            )
+        except np.linalg.LinAlgError:
+            pass
+    if lu_factor is not None and lu_solve is not None:
+        return DecoderNormalMatrixFactorization(
+            method="lu",
+            factor=lu_factor(regularized_normal_matrix, check_finite=False),
+        )
+    return DecoderNormalMatrixFactorization(method="matrix", factor=regularized_normal_matrix)
+
+
+def solve_with_decoder_normal_factorization(
+    factorization: DecoderNormalMatrixFactorization,
+    rhs: np.ndarray,
+) -> np.ndarray:
+    if factorization.method == "cholesky":
+        if cho_solve is None:
+            raise RuntimeError("Cholesky factorization is unavailable in this Python environment.")
+        return cho_solve(factorization.factor, rhs, check_finite=False)
+    if factorization.method == "lu":
+        if lu_solve is None:
+            raise RuntimeError("LU factorization is unavailable in this Python environment.")
+        return lu_solve(factorization.factor, rhs, check_finite=False)
+    if factorization.method == "matrix":
+        return np.linalg.solve(factorization.factor, rhs)
+    raise ValueError(f"Unknown decoder normal factorization method {factorization.method!r}")
 
 
 @timed("goattm.problems.solve_decoder_best_response_action_matrix")
@@ -1476,14 +1786,21 @@ def solve_decoder_best_response_action_matrix(
     mixed_action: np.ndarray,
     context: DistributedContext,
     solve_root: int = 0,
+    factorization: DecoderNormalMatrixFactorization | None = None,
 ) -> np.ndarray:
-    global_normal_matrix = context.reduce_array_sum_to_root(system.local_normal_matrix, root=solve_root)
+    if system.global_normal_matrix_cached:
+        global_normal_matrix = system.global_normal_matrix
+    else:
+        global_normal_matrix = context.reduce_array_sum_to_root(system.local_normal_matrix, root=solve_root)
     local_solution = np.zeros_like(mixed_action, dtype=np.float64)
     if context.rank == solve_root:
-        if global_normal_matrix is None:
+        if factorization is not None:
+            local_solution = solve_with_decoder_normal_factorization(factorization, -mixed_action)
+        elif global_normal_matrix is None:
             raise RuntimeError("Root rank did not receive reduced decoder best-response normal matrix.")
-        regularized_normal_matrix = global_normal_matrix + np.diag(system.regularization_diagonal)
-        local_solution = np.linalg.solve(regularized_normal_matrix, -mixed_action)
+        else:
+            regularized_normal_matrix = global_normal_matrix + np.diag(system.regularization_diagonal)
+            local_solution = np.linalg.solve(regularized_normal_matrix, -mixed_action)
     return context.bcast_array(local_solution, root=solve_root)
 
 
@@ -1566,6 +1883,9 @@ def dynamics_parameter_vector(dynamics: DynamicsLike) -> np.ndarray:
     elif isinstance(dynamics, SkewCPQuadraticDynamics):
         blocks.append(dynamics.a.reshape(-1))
         blocks.extend([dynamics.skew_u, dynamics.skew_v, dynamics.skew_z])
+    elif isinstance(dynamics, GeneralQuadraticDynamics):
+        blocks.append(dynamics.a.reshape(-1))
+        blocks.append(dynamics.h_matrix.reshape(-1))
     else:
         blocks.append(dynamics.a.reshape(-1))
         blocks.append(dynamics.mu_h)
@@ -1580,10 +1900,12 @@ def dynamics_parameter_key(dynamics: DynamicsLike) -> str:
         tag = "stabilized"
     elif isinstance(dynamics, SkewCPQuadraticDynamics):
         tag = "skew_cp"
+    elif isinstance(dynamics, GeneralQuadraticDynamics):
+        tag = "general_quadratic"
     elif isinstance(dynamics, LinearDynamics):
         tag = "linear"
     else:
-        tag = "general"
+        tag = "energy_quadratic"
     return _hashed_key(tag, dynamics_parameter_vector(dynamics))
 
 
@@ -1615,6 +1937,15 @@ def dynamics_from_parameter_vector(dynamics: DynamicsLike, vector: np.ndarray) -
             skew_u=direction.skew_u,
             skew_v=direction.skew_v,
             skew_z=direction.skew_z,
+            b=direction.b,
+            c=direction.c,
+        )
+    if isinstance(dynamics, GeneralQuadraticDynamics):
+        if direction.a is None or direction.h_matrix is None:
+            raise ValueError("General quadratic dynamics vector unpacking did not provide a/h_matrix.")
+        return GeneralQuadraticDynamics(
+            a=direction.a,
+            h_matrix=direction.h_matrix,
             b=direction.b,
             c=direction.c,
         )
@@ -1665,6 +1996,7 @@ def unpack_dynamics_parameter_vector(dynamics: DynamicsLike, vector: np.ndarray)
     skew_u = None
     skew_v = None
     skew_z = None
+    h_matrix = None
     if isinstance(dynamics, LinearDynamics):
         mu_h = dynamics.mu_h.copy()
     elif isinstance(dynamics, SkewCPQuadraticDynamics):
@@ -1678,9 +2010,15 @@ def unpack_dynamics_parameter_vector(dynamics: DynamicsLike, vector: np.ndarray)
         skew_z = flat[offset : offset + skew_z_size].reshape(dynamics.skew_z.shape)
         offset += skew_z_size
         mu_h = np.zeros(0, dtype=np.float64)
+    elif isinstance(dynamics, GeneralQuadraticDynamics):
+        h_size = dynamics.h_matrix.size
+        h_matrix = flat[offset : offset + h_size].reshape(dynamics.h_matrix.shape)
+        offset += h_size
+        mu_h = np.zeros(0, dtype=np.float64)
     else:
         mu_h = flat[offset : offset + dynamics.mu_h.size].reshape(dynamics.mu_h.shape)
         offset += dynamics.mu_h.size
+        h_matrix = None
     if dynamics.b is not None:
         b = flat[offset : offset + dynamics.b.size].reshape(dynamics.b.shape)
         offset += dynamics.b.size
@@ -1691,6 +2029,7 @@ def unpack_dynamics_parameter_vector(dynamics: DynamicsLike, vector: np.ndarray)
         mu_h=mu_h,
         c=c,
         a=a,
+        h_matrix=h_matrix,
         s_params=s_params,
         w_params=w_params,
         skew_u=skew_u,
@@ -1710,6 +2049,9 @@ def pack_dynamics_gradient_vector(dynamics: DynamicsLike, gradients: dict[str, n
     elif isinstance(dynamics, SkewCPQuadraticDynamics):
         blocks.append(gradients["a"])
         blocks.extend([gradients["skew_u"], gradients["skew_v"], gradients["skew_z"]])
+    elif isinstance(dynamics, GeneralQuadraticDynamics):
+        blocks.append(gradients["a"])
+        blocks.append(gradients["h_matrix"])
     else:
         blocks.append(gradients["a"])
         blocks.append(gradients["mu_h"])
@@ -1728,34 +2070,102 @@ def rhs_parameter_action(
     time: float,
     input_function: Callable[[float], np.ndarray] | None = None,
 ) -> np.ndarray:
-    quadratic_term = quadratic_features(state)
-    if isinstance(dynamics, StabilizedQuadraticDynamics):
-        if direction.s_params is None or direction.w_params is None:
-            raise ValueError("direction must provide s_params and w_params for stabilized dynamics.")
-        s_matrix = s_params_to_matrix(dynamics.s_params.astype(np.float64), dynamics.dimension)
-        ds_matrix = s_params_to_matrix(direction.s_params.astype(np.float64), dynamics.dimension)
-        dw_matrix = w_params_to_matrix(direction.w_params.astype(np.float64), dynamics.dimension)
-        delta_a = -(ds_matrix @ s_matrix.T + s_matrix @ ds_matrix.T) + dw_matrix
-    else:
-        if direction.a is None:
-            raise ValueError("direction must provide a for general dynamics.")
-        delta_a = direction.a
-    if isinstance(dynamics, SkewCPQuadraticDynamics):
-        if direction.skew_u is None or direction.skew_v is None or direction.skew_z is None:
-            raise ValueError("direction must provide skew_u/skew_v/skew_z for skew-CP dynamics.")
-        delta_quad = dynamics.quadratic_parameter_action(
-            direction.skew_u,
-            direction.skew_v,
-            direction.skew_z,
-            state,
-        )
-    else:
-        delta_h = mu_h_to_compressed_h(direction.mu_h.astype(np.float64), dynamics.dimension)
-        delta_quad = delta_h @ quadratic_term
-    action = delta_a @ state + delta_quad + direction.c
-    if dynamics.b is not None and direction.b is not None and input_function is not None:
-        action = action + direction.b @ np.asarray(input_function(time), dtype=np.float64)
+    delta_a, delta_h = _dynamics_direction_explicit_matrices(dynamics, direction)
+    action = explicit_rhs_parameter_action(
+        delta_a=delta_a,
+        delta_h=delta_h,
+        delta_c=direction.c,
+        delta_b=direction.b,
+        state=state,
+        time=time,
+        input_function=input_function,
+    )
     return action
+
+
+def explicit_rhs_parameter_action(
+    delta_a: np.ndarray,
+    delta_h: np.ndarray,
+    delta_c: np.ndarray,
+    delta_b: np.ndarray | None,
+    state: np.ndarray,
+    time: float,
+    input_function: Callable[[float], np.ndarray] | None = None,
+) -> np.ndarray:
+    """Apply a pre-expanded dynamics-parameter direction to one RHS state.
+
+    This is the hot callback used by tangent rollouts. It deliberately accepts
+    explicit ``delta_a`` and ``delta_h`` matrices so expensive parametrization
+    maps such as ``delta_mu_h -> delta_h`` are performed once per Hessian
+    direction, not once per RK stage.
+    """
+
+    action = delta_a @ state + delta_h @ quadratic_features(state) + delta_c
+    if delta_b is not None and input_function is not None:
+        action = action + delta_b @ np.asarray(input_function(time), dtype=np.float64)
+    return action
+
+
+def rollout_dynamics_parameter_tangent_from_base_rollout(
+    dynamics: DynamicsLike,
+    direction: DynamicsParameterDirection,
+    base_rollout: RolloutResult,
+    input_function: Callable[[float], np.ndarray] | None,
+    time_integrator: TimeIntegrator,
+) -> np.ndarray:
+    """Roll out the tangent induced by a dynamics-parameter direction.
+
+    Most time integrators only need the RHS parameter action. Lagged midpoint
+    also differentiates the frozen linear operator A + H(z, .), so we pass the
+    corresponding parameter-linear-operator action through the generic
+    time-integration wrapper. This keeps the GN/Schur code analytic rather than
+    relying on finite differences of the whole step.
+    """
+    delta_a, delta_h = _dynamics_direction_explicit_matrices(dynamics, direction)
+    if time_integrator == "lagged_midpoint":
+        fast_tangent_states = rollout_lagged_midpoint_explicit_parameter_tangent_from_base_rollout(
+            dynamics=dynamics,
+            base_rollout=base_rollout,
+            delta_a=delta_a,
+            delta_h=delta_h,
+            delta_b=direction.b,
+            delta_c=direction.c,
+            input_function=input_function,
+        )
+        if fast_tangent_states is not None:
+            return fast_tangent_states
+
+    parameter_action = lambda state, time: explicit_rhs_parameter_action(  # noqa: E731
+        delta_a=delta_a,
+        delta_h=delta_h,
+        delta_c=direction.c,
+        delta_b=direction.b,
+        state=state,
+        time=time,
+        input_function=input_function,
+    )
+    parameter_linear_operator_action = None
+    forcing_parameter_action = None
+    if time_integrator == "lagged_midpoint":
+        parameter_linear_operator_action = lambda predictor_state, _time: (  # noqa: E731
+            delta_a + quadratic_bilinear_action_matrix(delta_h, predictor_state)
+        )
+
+        def forcing_parameter_action(time: float) -> np.ndarray:
+            out = np.asarray(direction.c, dtype=np.float64).copy()
+            if dynamics.b is not None and direction.b is not None and input_function is not None:
+                out = out + direction.b @ np.asarray(input_function(time), dtype=np.float64)
+            return out
+
+    return rollout_tangent_from_base_rollout(
+        dynamics=dynamics,
+        base_rollout=base_rollout,
+        parameter_action=parameter_action,
+        input_function=input_function,
+        time_integrator=time_integrator,
+        parameter_linear_operator_action=parameter_linear_operator_action,
+        forcing_parameter_action=forcing_parameter_action,
+    )
 
 
 def decoder_feature_directional_derivative(state: np.ndarray, state_tangent: np.ndarray) -> np.ndarray:
@@ -1801,6 +2211,10 @@ def _dynamics_direction_explicit_matrices(
             direction.skew_v.astype(np.float64),
             direction.skew_z.astype(np.float64),
         )
+    elif isinstance(dynamics, GeneralQuadraticDynamics):
+        if direction.h_matrix is None:
+            raise ValueError("direction must provide h_matrix for general quadratic dynamics.")
+        delta_h = direction.h_matrix
     else:
         delta_h = mu_h_to_compressed_h(direction.mu_h.astype(np.float64), dynamics.dimension)
     return delta_a, delta_h
@@ -1959,7 +2373,9 @@ def _pack_dynamic_hessian_action_vector(
     if isinstance(dynamics, SkewCPQuadraticDynamics):
         raise NotImplementedError("Reduced Hessian actions are not implemented for skew-CP dynamics yet.")
     gradients: dict[str, np.ndarray] = {"c": delta_c_grad}
-    if not isinstance(dynamics, LinearDynamics):
+    if isinstance(dynamics, GeneralQuadraticDynamics):
+        gradients["h_matrix"] = delta_h_grad
+    elif not isinstance(dynamics, LinearDynamics):
         gradients["mu_h"] = compressed_h_gradient_to_mu_h(delta_h_grad.astype(np.float64), dynamics.dimension)
     if isinstance(dynamics, StabilizedQuadraticDynamics):
         if direction.s_params is None:
@@ -2005,6 +2421,9 @@ def _pack_dynamics_gradient_from_explicit_terms(
         gradients["mu_h"] = dynamics.pullback_h_gradient_to_mu_h(h_grad)
     elif isinstance(dynamics, LinearDynamics):
         gradients["a"] = a_grad
+    elif isinstance(dynamics, GeneralQuadraticDynamics):
+        gradients["a"] = a_grad
+        gradients["h_matrix"] = dynamics.pullback_h_gradient_to_h_matrix(h_grad)
     else:
         gradients["a"] = a_grad
         gradients["mu_h"] = dynamics.pullback_h_gradient_to_mu_h(h_grad)
@@ -2076,6 +2495,21 @@ def _dynamics_gradients_from_state_loss_gradients(
             adjoints=adjoints,
             input_function=input_function,
         )
+    elif integrator == "lagged_midpoint":
+        adjoints = compute_lagged_midpoint_discrete_adjoint(
+            dynamics=dynamics,
+            states=rollout.states,
+            times=rollout.times,
+            dt_history=rollout.dt_history,
+            state_loss_gradients=state_loss_gradients,
+            input_function=input_function,
+        )
+        a_grad, h_grad, b_grad, c_grad = accumulate_lagged_midpoint_parameter_gradients(
+            dynamics=dynamics,
+            rollout=rollout,
+            adjoints=adjoints,
+            input_function=input_function,
+        )
     else:
         adjoints = compute_skew_lagged_midpoint_discrete_adjoint(
             dynamics=dynamics,
@@ -2108,6 +2542,8 @@ def dynamics_regularization_loss(
         loss += regularization.coeff_mu_h * float(
             np.sum(dynamics.skew_u**2) + np.sum(dynamics.skew_v**2) + np.sum(dynamics.skew_z**2)
         )
+    elif isinstance(dynamics, GeneralQuadraticDynamics):
+        loss += regularization.coeff_mu_h * float(np.sum(dynamics.h_matrix**2))
     elif not isinstance(dynamics, LinearDynamics):
         loss += regularization.coeff_mu_h * float(np.sum(dynamics.mu_h**2))
     if dynamics.b is not None:
@@ -2125,6 +2561,8 @@ def dynamics_regularization_gradient_vector(
         gradients["skew_u"] = 2.0 * regularization.coeff_mu_h * np.asarray(dynamics.skew_u, dtype=np.float64)
         gradients["skew_v"] = 2.0 * regularization.coeff_mu_h * np.asarray(dynamics.skew_v, dtype=np.float64)
         gradients["skew_z"] = 2.0 * regularization.coeff_mu_h * np.asarray(dynamics.skew_z, dtype=np.float64)
+    elif isinstance(dynamics, GeneralQuadraticDynamics):
+        gradients["h_matrix"] = 2.0 * regularization.coeff_mu_h * np.asarray(dynamics.h_matrix, dtype=np.float64)
     elif not isinstance(dynamics, LinearDynamics):
         gradients["mu_h"] = 2.0 * regularization.coeff_mu_h * np.asarray(dynamics.mu_h, dtype=np.float64)
     if isinstance(dynamics, StabilizedQuadraticDynamics):
@@ -2156,11 +2594,16 @@ def dynamics_regularization_hessian_action(
         blocks.append(2.0 * regularization.coeff_mu_h * np.asarray(direction.skew_u, dtype=np.float64).reshape(-1))
         blocks.append(2.0 * regularization.coeff_mu_h * np.asarray(direction.skew_v, dtype=np.float64).reshape(-1))
         blocks.append(2.0 * regularization.coeff_mu_h * np.asarray(direction.skew_z, dtype=np.float64).reshape(-1))
+    elif isinstance(dynamics, GeneralQuadraticDynamics):
+        if direction.a is None or direction.h_matrix is None:
+            raise ValueError("direction must provide a/h_matrix for general quadratic dynamics.")
+        blocks.append(2.0 * regularization.coeff_a * np.asarray(direction.a, dtype=np.float64).reshape(-1))
+        blocks.append(2.0 * regularization.coeff_mu_h * np.asarray(direction.h_matrix, dtype=np.float64).reshape(-1))
     else:
         if direction.a is None:
             raise ValueError("direction must provide a for general dynamics.")
         blocks.append(2.0 * regularization.coeff_a * np.asarray(direction.a, dtype=np.float64).reshape(-1))
-    if not isinstance(dynamics, (LinearDynamics, SkewCPQuadraticDynamics)):
+    if not isinstance(dynamics, (LinearDynamics, SkewCPQuadraticDynamics, GeneralQuadraticDynamics)):
         blocks.append(2.0 * regularization.coeff_mu_h * np.asarray(direction.mu_h, dtype=np.float64).reshape(-1))
     if dynamics.b is not None:
         if direction.b is None:
@@ -2232,6 +2675,8 @@ def _zero_dynamics_gradients(dynamics: DynamicsLike) -> dict[str, np.ndarray]:
         gradients["skew_u"] = np.zeros_like(dynamics.skew_u, dtype=np.float64)
         gradients["skew_v"] = np.zeros_like(dynamics.skew_v, dtype=np.float64)
         gradients["skew_z"] = np.zeros_like(dynamics.skew_z, dtype=np.float64)
+    elif isinstance(dynamics, GeneralQuadraticDynamics):
+        gradients["h_matrix"] = np.zeros_like(dynamics.h_matrix, dtype=np.float64)
     elif not isinstance(dynamics, LinearDynamics):
         gradients["mu_h"] = np.zeros_like(dynamics.mu_h, dtype=np.float64)
     if isinstance(dynamics, StabilizedQuadraticDynamics):

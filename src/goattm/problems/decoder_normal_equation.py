@@ -38,6 +38,7 @@ from goattm.core.parametrization import compressed_quadratic_dimension, quadrati
 from goattm.data.npz_dataset import NpzQoiSample, NpzSampleManifest, load_npz_qoi_sample, load_npz_sample_manifest
 from goattm.losses.qoi_loss import trapezoidal_rule_weights_from_times
 from goattm.models.linear_dynamics import LinearDynamics
+from goattm.models.general_quadratic_dynamics import GeneralQuadraticDynamics
 from goattm.models.quadratic_decoder import QuadraticDecoder
 from goattm.models.quadratic_dynamics import QuadraticDynamics
 from goattm.models.skew_cp_quadratic_dynamics import SkewCPQuadraticDynamics
@@ -47,7 +48,7 @@ from goattm.runtime.distributed import DistributedContext
 from goattm.solvers.implicit_midpoint import rollout_implicit_midpoint_to_observation_times
 
 
-DynamicsLike = LinearDynamics | QuadraticDynamics | SkewCPQuadraticDynamics | StabilizedQuadraticDynamics
+DynamicsLike = LinearDynamics | GeneralQuadraticDynamics | QuadraticDynamics | SkewCPQuadraticDynamics | StabilizedQuadraticDynamics
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,7 @@ class DecoderNormalEquationSystem:
     local_observation_count: int
     global_observation_count: int
     local_sample_ids: tuple[str, ...]
+    global_normal_matrix_cached: bool = False
 
     @property
     def feature_dimension(self) -> int:
