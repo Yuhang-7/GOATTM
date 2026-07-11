@@ -789,20 +789,17 @@ def _rk4_half_parameter_gradients_cached_numba(
     p0: np.ndarray,
     pq: np.ndarray,
     pm: np.ndarray,
-    h_template: np.ndarray,
-    b_template: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    a_grad: np.ndarray,
+    h_grad: np.ndarray,
+    b_grad: np.ndarray,
+    c_grad: np.ndarray,
+) -> np.ndarray:
     """Reverse cached RK4 stages and accumulate their parameter gradients."""
     half_dt = 0.5 * dt
     k1_bar = (half_dt / 6.0) * predictor_bar
     k2_bar = (half_dt / 3.0) * predictor_bar
     k3_bar = (half_dt / 3.0) * predictor_bar
     k4_bar = (half_dt / 6.0) * predictor_bar
-    r = state.shape[0]
-    a_grad = np.zeros((r, r), dtype=np.float64)
-    h_grad = np.zeros_like(h_template)
-    b_grad = np.zeros_like(b_template)
-    c_grad = np.zeros(r, dtype=np.float64)
     state_bar = predictor_bar.copy()
 
     a_grad += np.outer(k4_bar, y4)
@@ -834,7 +831,7 @@ def _rk4_half_parameter_gradients_cached_numba(
     b_grad += np.outer(k1_bar, p0)
     c_grad += k1_bar
     state_bar += jacobian1.T @ k1_bar
-    return state_bar, a_grad, h_grad, b_grad, c_grad
+    return state_bar
 
 
 @njit(cache=True)
@@ -1174,22 +1171,21 @@ def accumulate_lagged_midpoint_parameter_gradients_cached_presampled_kernel(
         half_dt = 0.5 * dt_history[step]
         alpha = np.linalg.solve(system_matrices[step].T, adjoints[step + 1])
         operator_bar = half_dt * np.outer(alpha, states[step] + states[step + 1])
-        step_h_grad = np.zeros_like(h)
         predictor_bar = _accumulate_bilinear_reverse_numba(
-            h, predictors[step], operator_bar, step_h_grad
+            h, predictors[step], operator_bar, h_grad
         )
-        _, pred_a, pred_h, pred_b, pred_c = _rk4_half_parameter_gradients_cached_numba(
+        _rk4_half_parameter_gradients_cached_numba(
             states[step], dt_history[step], predictor_bar,
             stage2[step], stage3[step], stage4[step],
             jacobian1[step], jacobian2[step], jacobian3[step], jacobian4[step],
             feature1[step], feature2[step], feature3[step], feature4[step],
-            p0_values[step], pq_values[step], pm_values[step], h, b,
+            p0_values[step], pq_values[step], pm_values[step],
+            a_grad, h_grad, b_grad, c_grad,
         )
         forcing_bar = dt_history[step] * alpha
-        a_grad += operator_bar + pred_a
-        h_grad += step_h_grad + pred_h
-        b_grad += np.outer(forcing_bar, pm_values[step]) + pred_b
-        c_grad += forcing_bar + pred_c
+        a_grad += operator_bar
+        b_grad += np.outer(forcing_bar, pm_values[step])
+        c_grad += forcing_bar
     return a_grad, h_grad, b_grad, c_grad
 
 
@@ -1231,26 +1227,23 @@ def compute_lagged_midpoint_adjoint_and_parameter_gradients_cached_presampled_ke
         half_dt = 0.5 * dt
         alpha = np.linalg.solve(system_matrices[step].T, adjoints[step + 1])
         operator_bar = half_dt * np.outer(alpha, states[step] + states[step + 1])
-        step_h_grad = np.zeros_like(h)
         predictor_bar = _accumulate_bilinear_reverse_numba(
-            h, predictors[step], operator_bar, step_h_grad
+            h, predictors[step], operator_bar, h_grad
         )
-        pred_state_bar, pred_a, pred_h, pred_b, pred_c = (
-            _rk4_half_parameter_gradients_cached_numba(
-                states[step], dt, predictor_bar,
-                stage2[step], stage3[step], stage4[step],
-                jacobian1[step], jacobian2[step], jacobian3[step], jacobian4[step],
-                feature1[step], feature2[step], feature3[step], feature4[step],
-                p0_values[step], pq_values[step], pm_values[step], h, b,
-            )
+        pred_state_bar = _rk4_half_parameter_gradients_cached_numba(
+            states[step], dt, predictor_bar,
+            stage2[step], stage3[step], stage4[step],
+            jacobian1[step], jacobian2[step], jacobian3[step], jacobian4[step],
+            feature1[step], feature2[step], feature3[step], feature4[step],
+            p0_values[step], pq_values[step], pm_values[step],
+            a_grad, h_grad, b_grad, c_grad,
         )
         direct_state_bar = alpha + half_dt * (linear_operators[step].T @ alpha)
         adjoints[step, :] = (
             state_loss_gradients[step, :] + direct_state_bar + pred_state_bar
         )
         forcing_bar = dt * alpha
-        a_grad += operator_bar + pred_a
-        h_grad += step_h_grad + pred_h
-        b_grad += np.outer(forcing_bar, pm_values[step]) + pred_b
-        c_grad += forcing_bar + pred_c
+        a_grad += operator_bar
+        b_grad += np.outer(forcing_bar, pm_values[step])
+        c_grad += forcing_bar
     return adjoints, a_grad, h_grad, b_grad, c_grad
