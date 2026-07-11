@@ -36,6 +36,13 @@ HessianCaseName = Literal[
     "energy_varpro_gn",
 ]
 JointDecoderMode = Literal["provided", "best_response"]
+FiveCurvatureName = Literal[
+    "exact_joint",
+    "gn_joint",
+    "exact_varpro",
+    "gn_varpro",
+    "linearized_varpro",
+]
 
 
 @dataclass(frozen=True)
@@ -65,6 +72,16 @@ class HessianCaseOperator:
     name: HessianCaseName
     dynamics_form: Literal["general", "energy"]
     varpro: bool
+    dimension: int
+    operator: LinearOperator
+    prepare_seconds: float
+    metadata: dict[str, str | int | float | bool]
+
+
+@dataclass(frozen=True)
+class FiveCurvatureOperator:
+    name: FiveCurvatureName
+    dynamics_form: Literal["general", "energy"]
     dimension: int
     operator: LinearOperator
     prepare_seconds: float
@@ -235,6 +252,118 @@ def build_four_hessian_case_operators(
                     "decoder_source": decoder_source,
                     "dimension": int(dimension),
                     "prepare_seconds": float(prepare_seconds),
+                },
+            )
+        )
+    return tuple(operators)
+
+
+def build_five_curvature_operators(
+    manifest: str | Path | NpzSampleManifest,
+    dynamics: DynamicsLike,
+    decoder: QuadraticDecoder,
+    config: HessianLandscapeConfig,
+    dynamics_form: Literal["general", "energy"],
+    decoder_regularization: DecoderTikhonovRegularization | None = None,
+    dynamics_regularization: DynamicsTikhonovRegularization | None = None,
+    context: DistributedContext | None = None,
+) -> tuple[FiveCurvatureOperator, ...]:
+    """Build the five exact/GN joint and reduced curvature operators.
+
+    Joint operators are evaluated at the same decoder best response used by
+    the three reduced operators, so the exact and GN Schur identities compare
+    curvature at one common point.
+    """
+    if context is None:
+        context = DistributedContext.from_comm()
+    if decoder_regularization is None:
+        decoder_regularization = DecoderTikhonovRegularization()
+    if dynamics_regularization is None:
+        dynamics_regularization = DynamicsTikhonovRegularization()
+    if isinstance(manifest, (str, Path)):
+        manifest = load_npz_sample_manifest(manifest)
+    evaluator = ObservationAlignedBestResponseEvaluator(
+        manifest=manifest,
+        max_dt=config.max_dt,
+        context=context,
+        time_integrator=config.time_integrator,
+    )
+    decoder_template = zero_decoder_template_like(decoder)
+    workflow = evaluator.build_reduced_objective_workflow(
+        decoder_template=decoder_template,
+        regularization=decoder_regularization,
+        dynamics_regularization=dynamics_regularization,
+        solve_root=config.solve_root,
+    )
+    prepare_start = time.perf_counter()
+    prepared = workflow.prepare(dynamics)
+    prepare_seconds = time.perf_counter() - prepare_start
+    joint_decoder = prepared.result.decoder
+    joint_dimension = joint_parameter_dimension(dynamics, joint_decoder)
+    reduced_dimension = dynamics_parameter_dimension(dynamics)
+
+    callbacks: tuple[tuple[FiveCurvatureName, int, Callable[[np.ndarray], np.ndarray]], ...] = (
+        (
+            "exact_joint",
+            joint_dimension,
+            lambda vector: evaluator.evaluate_joint_exact_hessian_action(
+                prepared_state=prepared,
+                direction=vector,
+                decoder_template=decoder_template,
+                regularization=decoder_regularization,
+                dynamics_regularization=dynamics_regularization,
+                solve_root=config.solve_root,
+            ).action,
+        ),
+        (
+            "gn_joint",
+            joint_dimension,
+            lambda vector: evaluator.evaluate_joint_gauss_newton_hessian_action(
+                dynamics=dynamics,
+                decoder=joint_decoder,
+                direction=vector,
+                regularization=decoder_regularization,
+                dynamics_regularization=dynamics_regularization,
+            ).action,
+        ),
+        (
+            "exact_varpro",
+            reduced_dimension,
+            lambda vector: workflow.evaluate_exact_varpro_hessian_action_from_prepared_state(
+                prepared, vector
+            ).action,
+        ),
+        (
+            "gn_varpro",
+            reduced_dimension,
+            lambda vector: workflow.evaluate_gn_varpro_hessian_action_from_prepared_state(
+                prepared, vector
+            ).action,
+        ),
+        (
+            "linearized_varpro",
+            reduced_dimension,
+            lambda vector: workflow.evaluate_linearized_varpro_hessian_action_from_prepared_state(
+                prepared, vector
+            ).action,
+        ),
+    )
+    operators = []
+    for name, dimension, callback in callbacks:
+        counting_operator = _CountingLinearOperator(dimension, callback)
+        operators.append(
+            FiveCurvatureOperator(
+                name=name,
+                dynamics_form=dynamics_form,
+                dimension=dimension,
+                operator=counting_operator,
+                prepare_seconds=prepare_seconds,
+                metadata={
+                    "case": name,
+                    "dynamics_form": dynamics_form,
+                    "dimension": int(dimension),
+                    "prepare_seconds": float(prepare_seconds),
+                    "joint_decoder_source": "varpro_best_response",
                 },
             )
         )

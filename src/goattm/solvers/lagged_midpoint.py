@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable
 
 import numpy as np
@@ -606,6 +606,80 @@ def accumulate_lagged_midpoint_parameter_gradients(
         if b_grad is not None and db is not None:
             b_grad += db
     return a_grad, h_grad, b_grad, c_grad
+
+
+@timed("goattm.solvers.accumulate_lagged_midpoint_parameter_hessian_action_terms")
+def accumulate_lagged_midpoint_parameter_hessian_action_terms(
+    dynamics: QuadraticDynamics,
+    rollout: RolloutResult,
+    tangent_states: np.ndarray,
+    adjoints: np.ndarray,
+    adjoint_tangents: np.ndarray,
+    make_perturbed_dynamics: Callable[[float], QuadraticDynamics],
+    input_function: Callable[[float], np.ndarray] | None = None,
+    finite_difference_epsilon: float = 1.0e-6,
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray | None,
+    np.ndarray | None,
+    np.ndarray,
+    np.ndarray,
+]:
+    """Differentiate the discrete reverse-gradient assembly.
+
+    Forward and adjoint directions are supplied by the analytic incremental
+    solves.  The centered difference is applied only to the local discrete
+    parameter-gradient formula along those directions; it does not rerun a
+    perturbed forward or adjoint solve.
+    """
+    if tangent_states.shape != rollout.states.shape:
+        raise ValueError(f"tangent_states must have shape {rollout.states.shape}, got {tangent_states.shape}")
+    if adjoints.shape != rollout.states.shape:
+        raise ValueError(f"adjoints must have shape {rollout.states.shape}, got {adjoints.shape}")
+    if adjoint_tangents.shape != rollout.states.shape:
+        raise ValueError(
+            f"adjoint_tangents must have shape {rollout.states.shape}, got {adjoint_tangents.shape}"
+        )
+    epsilon = float(finite_difference_epsilon)
+    if not np.isfinite(epsilon) or epsilon <= 0.0:
+        raise ValueError("finite_difference_epsilon must be positive and finite.")
+
+    base_a, base_h, base_b, base_c = accumulate_lagged_midpoint_parameter_gradients(
+        dynamics=dynamics,
+        rollout=rollout,
+        adjoints=adjoints,
+        input_function=input_function,
+    )
+    perturbed_gradients = []
+    for sign in (-1.0, 1.0):
+        signed_epsilon = sign * epsilon
+        perturbed_rollout = replace(
+            rollout,
+            states=np.asarray(rollout.states + signed_epsilon * tangent_states, dtype=np.float64),
+            solver_cache=None,
+        )
+        perturbed_gradients.append(
+            accumulate_lagged_midpoint_parameter_gradients(
+                dynamics=make_perturbed_dynamics(signed_epsilon),
+                rollout=perturbed_rollout,
+                adjoints=np.asarray(
+                    adjoints + signed_epsilon * adjoint_tangents, dtype=np.float64
+                ),
+                input_function=input_function,
+            )
+        )
+    minus, plus = perturbed_gradients
+    scale = 0.5 / epsilon
+    delta_a = scale * (plus[0] - minus[0])
+    delta_h = scale * (plus[1] - minus[1])
+    delta_b = None
+    if plus[2] is not None and minus[2] is not None:
+        delta_b = scale * (plus[2] - minus[2])
+    delta_c = scale * (plus[3] - minus[3])
+    return base_a, delta_a, base_h, delta_h, base_b, delta_b, base_c, delta_c
 
 
 @timed("goattm.solvers.compute_lagged_midpoint_adjoint_and_parameter_gradients")

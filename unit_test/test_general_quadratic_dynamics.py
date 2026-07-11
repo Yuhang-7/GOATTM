@@ -22,9 +22,12 @@ from goattm.problems.reduced_qoi_best_response import (  # noqa: E402
     ObservationAlignedBestResponseEvaluator,
     dynamics_from_parameter_vector,
     dynamics_parameter_vector,
+    joint_parameter_vector,
+    matrix_to_decoder,
     rhs_parameter_action,
     rollout_dynamics_parameter_tangent_from_base_rollout,
     unpack_dynamics_parameter_vector,
+    split_joint_parameter_vector,
 )
 from goattm.runtime.distributed import DistributedContext  # noqa: E402
 from goattm.solvers.lagged_midpoint import (  # noqa: E402
@@ -192,6 +195,103 @@ class GeneralQuadraticDynamicsTest(unittest.TestCase):
         self.assertLessEqual(first_order_slope, 2.20)
         ratios = np.asarray(second_order_remainders, dtype=np.float64) / np.asarray(first_order_remainders, dtype=np.float64)
         self.assertLess(float(np.max(ratios)), 2.0e-3)
+
+    def test_lagged_midpoint_exact_varpro_action_matches_gradient_difference(self) -> None:
+        rng = np.random.default_rng(9113)
+        dynamics, decoder, manifest_path, regularization, tmpdir = self._build_general_varpro_fixture(rng)
+        self.addCleanup(tmpdir.cleanup)
+        template_decoder = QuadraticDecoder(
+            v1=np.zeros_like(decoder.v1),
+            v2=np.zeros_like(decoder.v2),
+            v0=np.zeros_like(decoder.v0),
+        )
+        evaluator = ObservationAlignedBestResponseEvaluator(
+            manifest=manifest_path,
+            max_dt=0.04,
+            time_integrator="lagged_midpoint",
+            context=DistributedContext(),
+        )
+        workflow = evaluator.build_reduced_objective_workflow(
+            decoder_template=template_decoder,
+            regularization=regularization,
+        )
+        prepared = workflow.prepare(dynamics)
+        base_vector = dynamics_parameter_vector(dynamics)
+        direction = rng.standard_normal(base_vector.shape)
+        direction /= np.linalg.norm(direction)
+        action = workflow.evaluate_exact_varpro_hessian_action_from_prepared_state(
+            prepared, direction
+        ).action
+
+        epsilon = 2.0e-5
+        gradients = []
+        for sign in (-1.0, 1.0):
+            perturbed = dynamics_from_parameter_vector(
+                dynamics, base_vector + sign * epsilon * direction
+            )
+            gradients.append(workflow.evaluate_gradient(perturbed))
+        finite_difference = (gradients[1] - gradients[0]) / (2.0 * epsilon)
+        relative_error = np.linalg.norm(action - finite_difference) / max(
+            1.0, np.linalg.norm(finite_difference)
+        )
+        self.assertLess(relative_error, 2.0e-5)
+
+    def test_lagged_midpoint_exact_joint_action_matches_gradient_difference(self) -> None:
+        rng = np.random.default_rng(9114)
+        dynamics, decoder, manifest_path, regularization, tmpdir = self._build_general_varpro_fixture(rng)
+        self.addCleanup(tmpdir.cleanup)
+        template_decoder = QuadraticDecoder(
+            v1=np.zeros_like(decoder.v1),
+            v2=np.zeros_like(decoder.v2),
+            v0=np.zeros_like(decoder.v0),
+        )
+        evaluator = ObservationAlignedBestResponseEvaluator(
+            manifest=manifest_path,
+            max_dt=0.04,
+            time_integrator="lagged_midpoint",
+            context=DistributedContext(),
+        )
+        workflow = evaluator.build_reduced_objective_workflow(
+            decoder_template=template_decoder,
+            regularization=regularization,
+        )
+        prepared = workflow.prepare(dynamics)
+        best_decoder = prepared.result.decoder
+        base_vector = joint_parameter_vector(dynamics, best_decoder)
+        direction = rng.standard_normal(base_vector.shape)
+        direction /= np.linalg.norm(direction)
+        action = evaluator.evaluate_joint_exact_hessian_action(
+            prepared_state=prepared,
+            direction=direction,
+            decoder_template=template_decoder,
+            regularization=regularization,
+        ).action
+
+        epsilon = 2.0e-5
+        gradients = []
+        for sign in (-1.0, 1.0):
+            perturbed_vector = base_vector + sign * epsilon * direction
+            dynamics_vector, decoder_matrix = split_joint_parameter_vector(
+                dynamics, best_decoder, perturbed_vector
+            )
+            perturbed_dynamics = dynamics_from_parameter_vector(
+                dynamics, dynamics_vector
+            )
+            perturbed_decoder = matrix_to_decoder(
+                dynamics.dimension, best_decoder.output_dimension, decoder_matrix
+            )
+            gradients.append(
+                evaluator.evaluate_joint_objective_and_gradient(
+                    dynamics=perturbed_dynamics,
+                    decoder=perturbed_decoder,
+                    regularization=regularization,
+                ).gradient
+            )
+        finite_difference = (gradients[1] - gradients[0]) / (2.0 * epsilon)
+        relative_error = np.linalg.norm(action - finite_difference) / max(
+            1.0, np.linalg.norm(finite_difference)
+        )
+        self.assertLess(relative_error, 3.0e-5)
 
     def test_lagged_midpoint_tangent_matches_finite_difference_for_general_quadratic(self) -> None:
         rng = np.random.default_rng(9105)
