@@ -187,7 +187,9 @@ class ReducedObjectivePreparedState:
 
 
 @dataclass(frozen=True)
-class ReducedHessianActionResult:
+class ExactVarProHessianActionResult:
+    """Action of the exact reduced Hessian after eliminating the decoder."""
+
     base_state: ReducedObjectivePreparedState
     direction: np.ndarray
     action: np.ndarray
@@ -195,7 +197,9 @@ class ReducedHessianActionResult:
 
 
 @dataclass(frozen=True)
-class ReducedGaussNewtonHessianActionResult:
+class LinearizedVarProHessianActionResult:
+    """Action of the linearized VarPro/Schur Gauss-Newton metric."""
+
     base_state: ReducedObjectivePreparedState
     direction: np.ndarray
     action: np.ndarray
@@ -208,6 +212,27 @@ class ReducedGaussNewtonHessianActionResult:
     def quadratic_form(self) -> float:
         return (
             self.projected_residual_tangent_norm_sq
+            + self.decoder_regularization_tangent_norm_sq
+            + self.dynamics_regularization_tangent_norm_sq
+        )
+
+
+@dataclass(frozen=True)
+class GNVarProHessianActionResult:
+    """Action of the true reduced-residual Gauss-Newton Hessian."""
+
+    base_state: ReducedObjectivePreparedState
+    direction: np.ndarray
+    action: np.ndarray
+    decoder_direction: QuadraticDecoder
+    residual_tangent_norm_sq: float
+    decoder_regularization_tangent_norm_sq: float
+    dynamics_regularization_tangent_norm_sq: float
+
+    @property
+    def quadratic_form(self) -> float:
+        return (
+            self.residual_tangent_norm_sq
             + self.decoder_regularization_tangent_norm_sq
             + self.dynamics_regularization_tangent_norm_sq
         )
@@ -331,24 +356,26 @@ class ReducedObjectiveWorkflow:
             solve_root=self.solve_root,
         )
 
-    @timed("goattm.problems.ReducedObjectiveWorkflow.evaluate_hessian_action")
-    def evaluate_hessian_action(
+    @timed("goattm.problems.ReducedObjectiveWorkflow.evaluate_exact_varpro_hessian_action")
+    def evaluate_exact_varpro_hessian_action(
         self,
         dynamics: DynamicsLike,
         direction: np.ndarray,
-    ) -> ReducedHessianActionResult:
-        return self.evaluate_hessian_action_from_prepared_state(
+    ) -> ExactVarProHessianActionResult:
+        """Apply the exact reduced Hessian of Phi(f*(g), g)."""
+        return self.evaluate_exact_varpro_hessian_action_from_prepared_state(
             prepared_state=self.prepare(dynamics),
             direction=direction,
         )
 
-    @timed("goattm.problems.ReducedObjectiveWorkflow.evaluate_hessian_action_from_prepared_state")
-    def evaluate_hessian_action_from_prepared_state(
+    @timed("goattm.problems.ReducedObjectiveWorkflow.evaluate_exact_varpro_hessian_action_from_prepared_state")
+    def evaluate_exact_varpro_hessian_action_from_prepared_state(
         self,
         prepared_state: ReducedObjectivePreparedState,
         direction: np.ndarray,
-    ) -> ReducedHessianActionResult:
-        return self.evaluator.evaluate_reduced_objective_hessian_action(
+    ) -> ExactVarProHessianActionResult:
+        """Apply the exact reduced Hessian using a cached base state."""
+        return self.evaluator.evaluate_exact_varpro_hessian_action(
             prepared_state=prepared_state,
             decoder_template=self.decoder_template,
             regularization=self.regularization,
@@ -357,24 +384,59 @@ class ReducedObjectiveWorkflow:
             solve_root=self.solve_root,
         )
 
-    @timed("goattm.problems.ReducedObjectiveWorkflow.evaluate_gauss_newton_hessian_action")
-    def evaluate_gauss_newton_hessian_action(
+    @timed("goattm.problems.ReducedObjectiveWorkflow.evaluate_linearized_varpro_hessian_action")
+    def evaluate_linearized_varpro_hessian_action(
         self,
         dynamics: DynamicsLike,
         direction: np.ndarray,
-    ) -> ReducedGaussNewtonHessianActionResult:
-        return self.evaluate_gauss_newton_hessian_action_from_prepared_state(
+    ) -> LinearizedVarProHessianActionResult:
+        """Apply the linearized VarPro/Schur Gauss-Newton Hessian."""
+        return self.evaluate_linearized_varpro_hessian_action_from_prepared_state(
             prepared_state=self.prepare(dynamics),
             direction=direction,
         )
 
-    @timed("goattm.problems.ReducedObjectiveWorkflow.evaluate_gauss_newton_hessian_action_from_prepared_state")
-    def evaluate_gauss_newton_hessian_action_from_prepared_state(
+    @timed("goattm.problems.ReducedObjectiveWorkflow.evaluate_linearized_varpro_hessian_action_from_prepared_state")
+    def evaluate_linearized_varpro_hessian_action_from_prepared_state(
         self,
         prepared_state: ReducedObjectivePreparedState,
         direction: np.ndarray,
-    ) -> ReducedGaussNewtonHessianActionResult:
-        return self.evaluator.evaluate_reduced_gauss_newton_hessian_action(
+    ) -> LinearizedVarProHessianActionResult:
+        """Apply the linearized VarPro/Schur Gauss-Newton Hessian from cache."""
+        return self.evaluator.evaluate_linearized_varpro_hessian_action(
+            prepared_state=prepared_state,
+            decoder_template=self.decoder_template,
+            regularization=self.regularization,
+            dynamics_regularization=self.dynamics_regularization,
+            direction=direction,
+            solve_root=self.solve_root,
+        )
+
+    @timed("goattm.problems.ReducedObjectiveWorkflow.evaluate_gn_varpro_hessian_action")
+    def evaluate_gn_varpro_hessian_action(
+        self,
+        dynamics: DynamicsLike,
+        direction: np.ndarray,
+    ) -> GNVarProHessianActionResult:
+        """Apply the true reduced-residual Gauss-Newton Hessian action.
+
+        This is the GN Hessian of r*(g) = r(f*(g), g), which requires the
+        exact best-response derivative Df*(g)[direction]. It is intentionally
+        separate from evaluate_linearized_varpro_hessian_action.
+        """
+        return self.evaluate_gn_varpro_hessian_action_from_prepared_state(
+            prepared_state=self.prepare(dynamics),
+            direction=direction,
+        )
+
+    @timed("goattm.problems.ReducedObjectiveWorkflow.evaluate_gn_varpro_hessian_action_from_prepared_state")
+    def evaluate_gn_varpro_hessian_action_from_prepared_state(
+        self,
+        prepared_state: ReducedObjectivePreparedState,
+        direction: np.ndarray,
+    ) -> GNVarProHessianActionResult:
+        """Apply the true GN VarPro Hessian action from a cached base state."""
+        return self.evaluator.evaluate_gn_varpro_hessian_action(
             prepared_state=prepared_state,
             decoder_template=self.decoder_template,
             regularization=self.regularization,
@@ -405,7 +467,7 @@ class ReducedObjectiveWorkflow:
         dynamics: DynamicsLike,
         direction: np.ndarray,
     ) -> np.ndarray:
-        return self.evaluate_hessian_action(
+        return self.evaluate_exact_varpro_hessian_action(
             dynamics=dynamics,
             direction=direction,
         ).action
@@ -994,8 +1056,8 @@ class ObservationAlignedBestResponseEvaluator:
             factorization=best_response.normal_factorization,
         )
 
-    @timed("goattm.problems.ObservationAlignedBestResponseEvaluator.compute_decoder_gauss_newton_mixed_action")
-    def compute_decoder_gauss_newton_mixed_action(
+    @timed("goattm.problems.ObservationAlignedBestResponseEvaluator.compute_decoder_linearized_varpro_mixed_action")
+    def compute_decoder_linearized_varpro_mixed_action(
         self,
         dynamics: DynamicsLike,
         decoder: QuadraticDecoder,
@@ -1034,8 +1096,8 @@ class ObservationAlignedBestResponseEvaluator:
         self.increment_solve_count("tangent_forward", len(forward_cache.local_rollouts))
         return self.context.allreduce_array_sum(local_action)
 
-    @timed("goattm.problems.ObservationAlignedBestResponseEvaluator.compute_decoder_gauss_newton_schur_action")
-    def compute_decoder_gauss_newton_schur_action(
+    @timed("goattm.problems.ObservationAlignedBestResponseEvaluator.compute_decoder_linearized_varpro_schur_action")
+    def compute_decoder_linearized_varpro_schur_action(
         self,
         dynamics: DynamicsLike,
         decoder_template: QuadraticDecoder,
@@ -1060,7 +1122,7 @@ class ObservationAlignedBestResponseEvaluator:
             regularization=regularization,
             solve_root=solve_root,
         )
-        mixed_action = self.compute_decoder_gauss_newton_mixed_action(dynamics, best_response.decoder, direction)
+        mixed_action = self.compute_decoder_linearized_varpro_mixed_action(dynamics, best_response.decoder, direction)
         return solve_decoder_best_response_action_matrix(
             best_response.system,
             mixed_action,
@@ -1069,8 +1131,56 @@ class ObservationAlignedBestResponseEvaluator:
             factorization=best_response.normal_factorization,
         )
 
-    @timed("goattm.problems.ObservationAlignedBestResponseEvaluator.evaluate_reduced_gauss_newton_hessian_action")
-    def evaluate_reduced_gauss_newton_hessian_action(
+    @timed("goattm.problems.ObservationAlignedBestResponseEvaluator.compute_decoder_mixed_hessian_adjoint_action")
+    def compute_decoder_mixed_hessian_adjoint_action(
+        self,
+        dynamics: DynamicsLike,
+        decoder: QuadraticDecoder,
+        decoder_direction: QuadraticDecoder,
+        forward_cache: ForwardRolloutCacheEntry,
+    ) -> np.ndarray:
+        """Apply the exact mixed Hessian adjoint F_gf to a decoder direction.
+
+        The decoder block Hessian F_ff is symmetric, so GN VarPro can reuse the
+        cached decoder normal factorization. This routine supplies the remaining
+        chain-rule pullback F_gf x after that solve.
+        """
+        total_dynamics_gradients = _zero_dynamics_gradients(dynamics)
+        for rollout_entry in forward_cache.local_rollouts:
+            state_loss_gradients = np.zeros_like(rollout_entry.rollout.states, dtype=np.float64)
+            for local_idx, global_idx in enumerate(rollout_entry.observation_indices):
+                state = rollout_entry.rollout.states[global_idx]
+                residual = decoder.decode(state) - rollout_entry.sample.qoi_observations[local_idx]
+                weight = float(rollout_entry.observation_weights[local_idx])
+                delta_jacobian = _decoder_jacobian_direction(
+                    decoder=decoder,
+                    decoder_direction=decoder_direction,
+                    state=state,
+                    state_tangent=np.zeros_like(state),
+                )
+                delta_residual = decoder_direction.decode(state)
+                state_loss_gradients[global_idx] = weight * (
+                    delta_jacobian.T @ residual + decoder.jacobian(state).T @ delta_residual
+                )
+
+            sample_gradients = _dynamics_gradients_from_state_loss_gradients(
+                dynamics=dynamics,
+                rollout=rollout_entry.rollout,
+                state_loss_gradients=state_loss_gradients,
+                input_function=rollout_entry.input_function,
+                time_integrator=self.time_integrator,
+            )
+            for key, value in sample_gradients.items():
+                total_dynamics_gradients[key] += value
+
+        self.increment_solve_count("adjoint", len(forward_cache.local_rollouts))
+        return pack_dynamics_gradient_vector(
+            dynamics,
+            sum_array_mapping(total_dynamics_gradients, self.context),
+        )
+
+    @timed("goattm.problems.ObservationAlignedBestResponseEvaluator.evaluate_gn_varpro_hessian_action")
+    def evaluate_gn_varpro_hessian_action(
         self,
         prepared_state: ReducedObjectivePreparedState,
         decoder_template: QuadraticDecoder,
@@ -1078,7 +1188,185 @@ class ObservationAlignedBestResponseEvaluator:
         dynamics_regularization: DynamicsTikhonovRegularization | None,
         direction: np.ndarray,
         solve_root: int = 0,
-    ) -> ReducedGaussNewtonHessianActionResult:
+    ) -> GNVarProHessianActionResult:
+        """Apply the true reduced-residual GN Hessian.
+
+        The tangent uses the exact best-response derivative
+
+            Df*(g)[dg] = -F_ff^{-1} F_fg dg.
+
+        The action also applies the transpose chain-rule factor
+
+            (Df*)^T y_f = -F_gf F_ff^{-1} y_f.
+
+        Since F_ff is the symmetric decoder normal matrix, both solves reuse
+        the same cached factorization.
+        """
+        if regularization is None:
+            regularization = DecoderTikhonovRegularization()
+        if dynamics_regularization is None:
+            dynamics_regularization = DynamicsTikhonovRegularization()
+        direction_vector = np.asarray(direction, dtype=np.float64).reshape(-1)
+        base_vector = dynamics_parameter_vector(prepared_state.dynamics)
+        if direction_vector.shape != base_vector.shape:
+            raise ValueError(f"direction must have shape {base_vector.shape}, got {direction_vector.shape}")
+
+        dynamics_direction = unpack_dynamics_parameter_vector(prepared_state.dynamics, direction_vector)
+        best_response = prepared_state.result.best_response_context
+        _ = decoder_template
+        feature_dim = decoder_feature_dimension(prepared_state.dynamics.dimension, best_response.decoder.form)
+        local_exact_mixed_action = np.zeros((feature_dim, best_response.decoder.output_dimension), dtype=np.float64)
+        local_rollouts = best_response.forward_cache.local_rollouts
+        decoder_matrix = decoder_parameter_matrix(best_response.decoder)
+        tangent_rollouts: list[np.ndarray] = []
+        for rollout_entry in local_rollouts:
+            tangent_states = rollout_dynamics_parameter_tangent_from_base_rollout(
+                dynamics=prepared_state.dynamics,
+                direction=dynamics_direction,
+                base_rollout=rollout_entry.rollout,
+                input_function=rollout_entry.input_function,
+                time_integrator=self.time_integrator,
+            )
+            tangent_rollouts.append(tangent_states)
+            observed_tangents = tangent_states[rollout_entry.observation_indices]
+            for state, state_tangent, q_target, weight in zip(
+                rollout_entry.observed_states,
+                observed_tangents,
+                rollout_entry.sample.qoi_observations,
+                rollout_entry.observation_weights,
+                strict=True,
+            ):
+                phi = decoder_feature_vector(state, best_response.decoder.form)
+                dphi = decoder_feature_directional_derivative(state, state_tangent)
+                if best_response.decoder.form == "V1v":
+                    dphi = np.concatenate([state_tangent, np.zeros(1, dtype=np.float64)])
+                q_pred = decoder_matrix.T @ phi
+                local_exact_mixed_action += float(weight) * (
+                    np.outer(dphi, q_pred)
+                    + np.outer(phi, decoder_matrix.T @ dphi)
+                    - np.outer(dphi, q_target)
+                )
+
+        self.increment_solve_count("tangent_forward", len(local_rollouts))
+        exact_mixed_action = self.context.allreduce_array_sum(local_exact_mixed_action)
+        decoder_action_matrix = solve_decoder_best_response_action_matrix(
+            best_response.system,
+            exact_mixed_action,
+            self.context,
+            solve_root=solve_root,
+            factorization=best_response.normal_factorization,
+        )
+        decoder_direction = matrix_to_decoder(
+            prepared_state.dynamics.dimension,
+            best_response.decoder.output_dimension,
+            decoder_action_matrix,
+        )
+
+        total_decoder_pullback = np.zeros_like(decoder_action_matrix, dtype=np.float64)
+        residual_tangent_norm_sq = 0.0
+        for rollout_entry, tangent_states in zip(local_rollouts, tangent_rollouts, strict=True):
+            observed_tangents = tangent_states[rollout_entry.observation_indices]
+            for local_idx, global_idx in enumerate(rollout_entry.observation_indices):
+                state = rollout_entry.rollout.states[global_idx]
+                state_tangent = observed_tangents[local_idx]
+                weight = float(rollout_entry.observation_weights[local_idx])
+                residual_tangent = best_response.decoder.jacobian(state) @ state_tangent + decoder_direction.decode(state)
+                weighted_residual_tangent = weight * residual_tangent
+                residual_tangent_norm_sq += weight * float(np.dot(residual_tangent, residual_tangent))
+                total_decoder_pullback += np.outer(
+                    decoder_feature_vector(state, best_response.decoder.form),
+                    weighted_residual_tangent,
+                )
+
+        decoder_pullback = self.context.allreduce_array_sum(total_decoder_pullback)
+        decoder_reg_action_matrix = decoder_regularization_hessian_action_matrix(
+            best_response.decoder,
+            regularization,
+            decoder_action_matrix,
+        )
+        decoder_pullback = decoder_pullback + decoder_reg_action_matrix
+        decoder_adjoint_response_matrix = solve_decoder_best_response_action_matrix(
+            best_response.system,
+            -decoder_pullback,
+            self.context,
+            solve_root=solve_root,
+            factorization=best_response.normal_factorization,
+        )
+        decoder_adjoint_response = matrix_to_decoder(
+            prepared_state.dynamics.dimension,
+            best_response.decoder.output_dimension,
+            decoder_adjoint_response_matrix,
+        )
+
+        total_dynamics_gradients = _zero_dynamics_gradients(prepared_state.dynamics)
+        for rollout_entry, tangent_states in zip(local_rollouts, tangent_rollouts, strict=True):
+            observed_tangents = tangent_states[rollout_entry.observation_indices]
+            state_loss_gradients = np.zeros_like(rollout_entry.rollout.states, dtype=np.float64)
+            for local_idx, global_idx in enumerate(rollout_entry.observation_indices):
+                state = rollout_entry.rollout.states[global_idx]
+                state_tangent = observed_tangents[local_idx]
+                weight = float(rollout_entry.observation_weights[local_idx])
+                residual = best_response.decoder.decode(state) - rollout_entry.sample.qoi_observations[local_idx]
+                residual_tangent = best_response.decoder.jacobian(state) @ state_tangent + decoder_direction.decode(state)
+                weighted_residual_tangent = weight * residual_tangent
+                direct_source = best_response.decoder.jacobian(state).T @ weighted_residual_tangent
+                adjoint_delta_jacobian = _decoder_jacobian_direction(
+                    decoder=best_response.decoder,
+                    decoder_direction=decoder_adjoint_response,
+                    state=state,
+                    state_tangent=np.zeros_like(state),
+                )
+                adjoint_delta_residual = decoder_adjoint_response.decode(state)
+                mixed_source = weight * (
+                    adjoint_delta_jacobian.T @ residual
+                    + best_response.decoder.jacobian(state).T @ adjoint_delta_residual
+                )
+                state_loss_gradients[global_idx] = direct_source - mixed_source
+
+            sample_gradients = _dynamics_gradients_from_state_loss_gradients(
+                dynamics=prepared_state.dynamics,
+                rollout=rollout_entry.rollout,
+                state_loss_gradients=state_loss_gradients,
+                input_function=rollout_entry.input_function,
+                time_integrator=self.time_integrator,
+            )
+            for key, value in sample_gradients.items():
+                total_dynamics_gradients[key] += value
+
+        self.increment_solve_count("adjoint", len(local_rollouts))
+        fused_dynamics_action = pack_dynamics_gradient_vector(
+            prepared_state.dynamics,
+            sum_array_mapping(total_dynamics_gradients, self.context),
+        )
+        dynamics_reg_action = dynamics_regularization_hessian_action(
+            prepared_state.dynamics,
+            dynamics_regularization,
+            direction_vector,
+        )
+        action = fused_dynamics_action + dynamics_reg_action
+        residual_tangent_norm_sq = self.context.allreduce_scalar_sum(residual_tangent_norm_sq)
+        decoder_regularization_tangent_norm_sq = float(np.sum(decoder_reg_action_matrix * decoder_action_matrix))
+        dynamics_regularization_tangent_norm_sq = float(np.dot(direction_vector, dynamics_reg_action))
+        return GNVarProHessianActionResult(
+            base_state=prepared_state,
+            direction=direction_vector.copy(),
+            action=action,
+            decoder_direction=decoder_direction,
+            residual_tangent_norm_sq=residual_tangent_norm_sq,
+            decoder_regularization_tangent_norm_sq=decoder_regularization_tangent_norm_sq,
+            dynamics_regularization_tangent_norm_sq=dynamics_regularization_tangent_norm_sq,
+        )
+
+    @timed("goattm.problems.ObservationAlignedBestResponseEvaluator.evaluate_linearized_varpro_hessian_action")
+    def evaluate_linearized_varpro_hessian_action(
+        self,
+        prepared_state: ReducedObjectivePreparedState,
+        decoder_template: QuadraticDecoder,
+        regularization: DecoderTikhonovRegularization | None,
+        dynamics_regularization: DynamicsTikhonovRegularization | None,
+        direction: np.ndarray,
+        solve_root: int = 0,
+    ) -> LinearizedVarProHessianActionResult:
         """Apply the VarPro/Schur Gauss-Newton metric to a dynamics direction.
 
         This computes the reduced linearized least-squares curvature
@@ -1177,7 +1465,7 @@ class ObservationAlignedBestResponseEvaluator:
             np.sum(decoder_regularization_hessian_action_matrix(best_response.decoder, regularization, decoder_action_matrix) * decoder_action_matrix)
         )
         dynamics_regularization_tangent_norm_sq = float(np.dot(direction_vector, dynamics_reg_action))
-        return ReducedGaussNewtonHessianActionResult(
+        return LinearizedVarProHessianActionResult(
             base_state=prepared_state,
             direction=direction_vector.copy(),
             action=action,
@@ -1303,8 +1591,8 @@ class ObservationAlignedBestResponseEvaluator:
             solve_root=solve_root,
         )
 
-    @timed("goattm.problems.ObservationAlignedBestResponseEvaluator.evaluate_reduced_objective_hessian_action")
-    def evaluate_reduced_objective_hessian_action(
+    @timed("goattm.problems.ObservationAlignedBestResponseEvaluator.evaluate_exact_varpro_hessian_action")
+    def evaluate_exact_varpro_hessian_action(
         self,
         prepared_state: ReducedObjectivePreparedState,
         decoder_template: QuadraticDecoder,
@@ -1312,7 +1600,7 @@ class ObservationAlignedBestResponseEvaluator:
         dynamics_regularization: DynamicsTikhonovRegularization | None,
         direction: np.ndarray,
         solve_root: int = 0,
-    ) -> ReducedHessianActionResult:
+    ) -> ExactVarProHessianActionResult:
         if regularization is None:
             regularization = DecoderTikhonovRegularization()
         if dynamics_regularization is None:
@@ -1544,7 +1832,7 @@ class ObservationAlignedBestResponseEvaluator:
             dynamics_regularization,
             direction_vector,
         )
-        return ReducedHessianActionResult(
+        return ExactVarProHessianActionResult(
             base_state=prepared_state,
             direction=direction_vector.copy(),
             action=action,
@@ -1565,7 +1853,7 @@ class ObservationAlignedBestResponseEvaluator:
         basis = np.eye(dimension, dtype=np.float64)
         hessian = np.zeros((dimension, dimension), dtype=np.float64)
         for column_idx in range(dimension):
-            action_result = self.evaluate_reduced_objective_hessian_action(
+            action_result = self.evaluate_exact_varpro_hessian_action(
                 prepared_state=prepared_state,
                 decoder_template=decoder_template,
                 regularization=regularization,

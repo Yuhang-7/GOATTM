@@ -225,7 +225,7 @@ class ExplicitEulerPipelineTest(unittest.TestCase):
             direction = rng.standard_normal(base.gradient.shape[0])
             direction /= np.linalg.norm(direction)
             directional_derivative = float(np.dot(base.gradient, direction))
-            hessian_action = workflow.evaluate_hessian_action(candidate, direction).action
+            hessian_action = workflow.evaluate_exact_varpro_hessian_action(candidate, direction).action
             quadratic_term = float(np.dot(direction, hessian_action))
             base_vector = dynamics_parameter_vector(candidate)
 

@@ -190,7 +190,7 @@ def build_four_hessian_case_operators(
             dimension = dynamics_parameter_dimension(case_dynamics)
 
             def matvec(vector: np.ndarray, workflow=workflow, prepared=prepared) -> np.ndarray:
-                return workflow.evaluate_gauss_newton_hessian_action_from_prepared_state(prepared, vector).action
+                return workflow.evaluate_linearized_varpro_hessian_action_from_prepared_state(prepared, vector).action
 
             decoder_source = "varpro_best_response"
         else:

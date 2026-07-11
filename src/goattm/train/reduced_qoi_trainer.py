@@ -350,7 +350,7 @@ class NewtonActionUpdater:
         tolerance = float(self.config.cg_tolerance)
 
         def matvec(vector: np.ndarray) -> np.ndarray:
-            action = workflow.evaluate_hessian_action_from_prepared_state(
+            action = workflow.evaluate_exact_varpro_hessian_action_from_prepared_state(
                 prepared_state=prepared_state,
                 direction=vector,
             ).action

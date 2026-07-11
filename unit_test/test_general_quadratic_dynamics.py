@@ -23,10 +23,12 @@ from goattm.problems.reduced_qoi_best_response import (  # noqa: E402
     dynamics_from_parameter_vector,
     dynamics_parameter_vector,
     rhs_parameter_action,
+    rollout_dynamics_parameter_tangent_from_base_rollout,
     unpack_dynamics_parameter_vector,
 )
 from goattm.runtime.distributed import DistributedContext  # noqa: E402
 from goattm.solvers.time_integration import rollout_tangent_from_base_rollout, rollout_to_observation_times  # noqa: E402
+from goattm.train.quotient_trust_region import quotient_vertical_basis  # noqa: E402
 
 
 class GeneralQuadraticDynamicsTest(unittest.TestCase):
@@ -142,6 +144,50 @@ class GeneralQuadraticDynamicsTest(unittest.TestCase):
             self.assertGreaterEqual(first_slope, 1.60)
             self.assertLessEqual(first_slope, 2.40)
 
+    def test_exact_varpro_hessian_action_has_reduced_objective_taylor_model(self) -> None:
+        rng = np.random.default_rng(9109)
+        dynamics, decoder, manifest_path, regularization, tmpdir = self._build_general_varpro_fixture(rng)
+        self.addCleanup(tmpdir.cleanup)
+        template_decoder = QuadraticDecoder(
+            v1=np.zeros_like(decoder.v1),
+            v2=np.zeros_like(decoder.v2),
+            v0=np.zeros_like(decoder.v0),
+        )
+        evaluator = ObservationAlignedBestResponseEvaluator(
+            manifest=manifest_path,
+            max_dt=0.04,
+            time_integrator="explicit_euler",
+            context=DistributedContext(),
+        )
+        workflow = evaluator.build_reduced_objective_workflow(
+            decoder_template=template_decoder,
+            regularization=regularization,
+        )
+        prepared = workflow.prepare(dynamics)
+        base_vector = dynamics_parameter_vector(dynamics)
+        direction = rng.standard_normal(base_vector.shape)
+        direction /= np.linalg.norm(direction)
+        action = workflow.evaluate_exact_varpro_hessian_action_from_prepared_state(prepared, direction)
+        first_derivative = float(np.dot(prepared.gradient, direction))
+        second_derivative = float(np.dot(direction, action.action))
+
+        eps_values = np.array([1.0e-2, 3.0e-3, 1.0e-3, 3.0e-4, 1.0e-4], dtype=np.float64)
+        first_order_remainders = []
+        second_order_remainders = []
+        for eps in eps_values:
+            perturbed = dynamics_from_parameter_vector(dynamics, base_vector + eps * direction)
+            value = workflow.evaluate_objective(perturbed)
+            first_order_remainders.append(abs(value - prepared.objective_value - eps * first_derivative))
+            second_order_remainders.append(
+                abs(value - prepared.objective_value - eps * first_derivative - 0.5 * eps * eps * second_derivative)
+            )
+
+        first_order_slope = self._fit_slope(eps_values, np.asarray(first_order_remainders, dtype=np.float64))
+        self.assertGreaterEqual(first_order_slope, 1.80)
+        self.assertLessEqual(first_order_slope, 2.20)
+        ratios = np.asarray(second_order_remainders, dtype=np.float64) / np.asarray(first_order_remainders, dtype=np.float64)
+        self.assertLess(float(np.max(ratios)), 2.0e-3)
+
     def test_lagged_midpoint_tangent_matches_finite_difference_for_general_quadratic(self) -> None:
         rng = np.random.default_rng(9105)
         r, dp = 3, 1
@@ -236,9 +282,9 @@ class GeneralQuadraticDynamicsTest(unittest.TestCase):
         w /= np.linalg.norm(w)
 
         counts_before = evaluator.solve_count_record()
-        gv = workflow.evaluate_gauss_newton_hessian_action_from_prepared_state(prepared, v)
+        gv = workflow.evaluate_linearized_varpro_hessian_action_from_prepared_state(prepared, v)
         counts_after_v = evaluator.solve_count_record()
-        gw = workflow.evaluate_gauss_newton_hessian_action_from_prepared_state(prepared, w)
+        gw = workflow.evaluate_linearized_varpro_hessian_action_from_prepared_state(prepared, w)
         counts_after_w = evaluator.solve_count_record()
         sample_count = prepared.result.best_response_context.forward_cache.global_sample_count
 
@@ -248,6 +294,185 @@ class GeneralQuadraticDynamicsTest(unittest.TestCase):
         np.testing.assert_allclose(float(np.dot(v, gv.action)), gv.quadratic_form, rtol=1e-6, atol=1e-8)
         np.testing.assert_allclose(float(np.dot(v, gw.action)), float(np.dot(w, gv.action)), rtol=1e-6, atol=1e-8)
         self.assertGreaterEqual(gv.quadratic_form, -1e-12)
+
+    def test_linearized_varpro_hessian_action_has_frozen_schur_taylor_model(self) -> None:
+        rng = np.random.default_rng(9110)
+        dynamics, decoder, manifest_path, _, tmpdir = self._build_general_varpro_fixture(rng)
+        self.addCleanup(tmpdir.cleanup)
+        template_decoder = QuadraticDecoder(
+            v1=np.zeros_like(decoder.v1),
+            v2=np.zeros_like(decoder.v2),
+            v0=np.zeros_like(decoder.v0),
+        )
+        evaluator = ObservationAlignedBestResponseEvaluator(
+            manifest=manifest_path,
+            max_dt=0.04,
+            time_integrator="lagged_midpoint",
+            context=DistributedContext(),
+        )
+        workflow = evaluator.build_reduced_objective_workflow(
+            decoder_template=template_decoder,
+            regularization=DecoderTikhonovRegularization(),
+        )
+        prepared = workflow.prepare(dynamics)
+        direction = rng.standard_normal(dynamics_parameter_vector(dynamics).shape)
+        direction /= np.linalg.norm(direction)
+
+        action = workflow.evaluate_linearized_varpro_hessian_action_from_prepared_state(prepared, direction)
+        residual = self._weighted_residual_vector_from_best_response(prepared.result.best_response_context)
+        tangent = self._varpro_residual_tangent_vector(prepared, direction, action.decoder_direction, "lagged_midpoint")
+        model_value = 0.5 * float(np.dot(residual, residual))
+        model_gradient_action = float(np.dot(residual, tangent))
+        model_hessian_action = float(np.dot(tangent, tangent))
+
+        np.testing.assert_allclose(model_gradient_action, float(np.dot(prepared.gradient, direction)), rtol=1e-6, atol=1e-12)
+        np.testing.assert_allclose(model_hessian_action, float(np.dot(direction, action.action)), rtol=1e-6, atol=1e-12)
+        for eps in (1.0e-2, 3.0e-3, 1.0e-3, 3.0e-4):
+            shifted_model_value = 0.5 * float(np.dot(residual + eps * tangent, residual + eps * tangent))
+            taylor_value = model_value + eps * model_gradient_action + 0.5 * eps * eps * model_hessian_action
+            np.testing.assert_allclose(shifted_model_value, taylor_value, rtol=1e-12, atol=1e-16)
+
+    def test_general_quadratic_gn_varpro_action_is_symmetric_and_matches_qform(self) -> None:
+        rng = np.random.default_rng(9106)
+        dynamics, decoder, manifest_path, regularization, tmpdir = self._build_general_varpro_fixture(rng)
+        self.addCleanup(tmpdir.cleanup)
+        template_decoder = QuadraticDecoder(
+            v1=np.zeros_like(decoder.v1),
+            v2=np.zeros_like(decoder.v2),
+            v0=np.zeros_like(decoder.v0),
+        )
+        evaluator = ObservationAlignedBestResponseEvaluator(
+            manifest=manifest_path,
+            max_dt=0.04,
+            time_integrator="lagged_midpoint",
+            context=DistributedContext(),
+        )
+        workflow = evaluator.build_reduced_objective_workflow(
+            decoder_template=template_decoder,
+            regularization=regularization,
+        )
+        prepared = workflow.prepare(dynamics)
+        v = rng.standard_normal(dynamics_parameter_vector(dynamics).shape)
+        w = rng.standard_normal(dynamics_parameter_vector(dynamics).shape)
+        v /= np.linalg.norm(v)
+        w /= np.linalg.norm(w)
+
+        counts_before = evaluator.solve_count_record()
+        gv = workflow.evaluate_gn_varpro_hessian_action_from_prepared_state(prepared, v)
+        counts_after_v = evaluator.solve_count_record()
+        gw = workflow.evaluate_gn_varpro_hessian_action_from_prepared_state(prepared, w)
+        counts_after_w = evaluator.solve_count_record()
+        sample_count = prepared.result.best_response_context.forward_cache.global_sample_count
+
+        self.assertEqual(counts_after_v["tangent_forward"] - counts_before["tangent_forward"], sample_count)
+        self.assertEqual(counts_after_w["tangent_forward"] - counts_after_v["tangent_forward"], sample_count)
+        self.assertEqual(counts_after_v["adjoint"] - counts_before["adjoint"], sample_count)
+        self.assertEqual(counts_after_w["adjoint"] - counts_after_v["adjoint"], sample_count)
+
+        np.testing.assert_allclose(float(np.dot(v, gv.action)), gv.quadratic_form, rtol=1e-6, atol=1e-8)
+        np.testing.assert_allclose(float(np.dot(v, gw.action)), float(np.dot(w, gv.action)), rtol=1e-6, atol=1e-8)
+        self.assertGreaterEqual(gv.quadratic_form, -1e-12)
+
+    def test_general_quadratic_gn_varpro_action_matches_residual_finite_difference(self) -> None:
+        rng = np.random.default_rng(9107)
+        dynamics, decoder, manifest_path, _, tmpdir = self._build_general_varpro_fixture(rng)
+        self.addCleanup(tmpdir.cleanup)
+        template_decoder = QuadraticDecoder(
+            v1=np.zeros_like(decoder.v1),
+            v2=np.zeros_like(decoder.v2),
+            v0=np.zeros_like(decoder.v0),
+        )
+        evaluator = ObservationAlignedBestResponseEvaluator(
+            manifest=manifest_path,
+            max_dt=0.04,
+            time_integrator="lagged_midpoint",
+            context=DistributedContext(),
+        )
+        workflow = evaluator.build_reduced_objective_workflow(
+            decoder_template=template_decoder,
+            regularization=DecoderTikhonovRegularization(),
+        )
+        prepared = workflow.prepare(dynamics)
+        base_vector = dynamics_parameter_vector(dynamics)
+        v = rng.standard_normal(base_vector.shape)
+        w = rng.standard_normal(base_vector.shape)
+        v /= np.linalg.norm(v)
+        w /= np.linalg.norm(w)
+
+        hv = workflow.evaluate_gn_varpro_hessian_action_from_prepared_state(prepared, v)
+        hw = workflow.evaluate_gn_varpro_hessian_action_from_prepared_state(prepared, w)
+        residual = self._weighted_residual_vector_from_best_response(prepared.result.best_response_context)
+        jv = self._varpro_residual_tangent_vector(prepared, v, hv.decoder_direction, "lagged_midpoint")
+        jw = self._varpro_residual_tangent_vector(prepared, w, hw.decoder_direction, "lagged_midpoint")
+
+        np.testing.assert_allclose(float(np.dot(v, hv.action)), float(np.dot(jv, jv)), rtol=1e-6, atol=1e-12)
+        np.testing.assert_allclose(float(np.dot(w, hv.action)), float(np.dot(jw, jv)), rtol=1e-6, atol=1e-12)
+
+        eps_values = np.array([1.0e-3, 3.0e-4, 1.0e-4], dtype=np.float64)
+        residual_taylor_errors = []
+        for eps in eps_values:
+            plus = dynamics_from_parameter_vector(dynamics, base_vector + eps * v)
+            residual_plus = self._reduced_residual_vector(workflow, plus)
+            residual_taylor_errors.append(float(np.linalg.norm(residual_plus - residual - eps * jv)))
+        residual_taylor_slope = self._fit_slope(eps_values, np.asarray(residual_taylor_errors, dtype=np.float64))
+        self.assertGreaterEqual(residual_taylor_slope, 1.70)
+        self.assertLessEqual(residual_taylor_slope, 2.30)
+
+        eps = 3.0e-4
+        def finite_difference_residual(direction: np.ndarray) -> np.ndarray:
+            plus = dynamics_from_parameter_vector(dynamics, base_vector + eps * direction)
+            minus = dynamics_from_parameter_vector(dynamics, base_vector - eps * direction)
+            return (
+                self._reduced_residual_vector(workflow, plus)
+                - self._reduced_residual_vector(workflow, minus)
+            ) / (2.0 * eps)
+
+        jv_fd = finite_difference_residual(v)
+        jw_fd = finite_difference_residual(w)
+        np.testing.assert_allclose(float(np.dot(jv, jv)), float(np.dot(jv_fd, jv_fd)), rtol=2e-3, atol=1e-12)
+        np.testing.assert_allclose(float(np.dot(jw, jv)), float(np.dot(jw_fd, jv_fd)), rtol=2e-3, atol=1e-12)
+
+    def test_quadratic_gn_varpro_gauge_vertical_direction_is_null_with_zero_initial_state(self) -> None:
+        rng = np.random.default_rng(9108)
+        r, dq = 3, 2
+        dynamics = QuadraticDynamics(
+            a=-0.10 * np.eye(r) + 0.02 * rng.standard_normal((r, r)),
+            mu_h=0.015 * rng.standard_normal(mu_h_dimension(r)),
+            b=np.array([[0.15], [-0.08], [0.04]], dtype=np.float64),
+            c=0.01 * rng.standard_normal(r),
+        )
+        decoder = QuadraticDecoder(
+            v1=0.18 * rng.standard_normal((dq, r)),
+            v2=0.04 * rng.standard_normal((dq, compressed_quadratic_dimension(r))),
+            v0=0.02 * rng.standard_normal(dq),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = self._write_zero_initial_dataset(Path(tmp), dynamics, decoder, sample_count=8, rng=rng)
+            template_decoder = QuadraticDecoder(
+                v1=np.zeros_like(decoder.v1),
+                v2=np.zeros_like(decoder.v2),
+                v0=np.zeros_like(decoder.v0),
+            )
+            evaluator = ObservationAlignedBestResponseEvaluator(
+                manifest=manifest_path,
+                max_dt=0.04,
+                time_integrator="lagged_midpoint",
+                context=DistributedContext(),
+            )
+            workflow = evaluator.build_reduced_objective_workflow(
+                decoder_template=template_decoder,
+                regularization=DecoderTikhonovRegularization(),
+            )
+            prepared = workflow.prepare(dynamics)
+            vertical = quotient_vertical_basis(dynamics)
+            self.assertGreater(vertical.shape[1], 0)
+            for _ in range(20):
+                coeffs = rng.standard_normal(vertical.shape[1])
+                direction = vertical @ coeffs
+                direction = direction / np.linalg.norm(direction)
+                action = workflow.evaluate_gn_varpro_hessian_action_from_prepared_state(prepared, direction)
+                self.assertLess(abs(action.quadratic_form), 1e-14)
+                self.assertLess(abs(float(np.dot(direction, action.action))), 1e-14)
 
     def test_energy_and_general_quadratic_joint_gn_actions_match_when_h_matches(self) -> None:
         rng = np.random.default_rng(9104)
@@ -340,6 +565,97 @@ class GeneralQuadraticDynamicsTest(unittest.TestCase):
             sample_ids=np.asarray(sample_ids, dtype=object),
         )
         return manifest_path
+
+    def _write_zero_initial_dataset(
+        self,
+        root: Path,
+        dynamics: QuadraticDynamics,
+        decoder: QuadraticDecoder,
+        sample_count: int,
+        rng: np.random.Generator,
+    ) -> Path:
+        observation_times = np.linspace(0.0, 0.20, 6)
+        sample_paths: list[str] = []
+        sample_ids: list[str] = []
+        for sample_idx in range(sample_count):
+            u0 = np.zeros(dynamics.dimension, dtype=np.float64)
+            input_values = np.column_stack([0.2 + 0.04 * np.sin(2.0 * np.pi * observation_times + 0.3 * sample_idx)])
+            input_function = self._linear_input_function(observation_times, input_values)
+            rollout, observation_indices = rollout_to_observation_times(
+                dynamics=dynamics,
+                u0=u0,
+                observation_times=observation_times,
+                max_dt=0.04,
+                input_function=input_function,
+                time_integrator="lagged_midpoint",
+            )
+            qoi_observations = np.vstack([decoder.decode(state) for state in rollout.states[observation_indices]])
+            sample_path = root / f"sample_{sample_idx}.npz"
+            np.savez(
+                sample_path,
+                sample_id=np.array(f"sample-{sample_idx}"),
+                observation_times=observation_times,
+                u0=u0,
+                qoi_observations=qoi_observations,
+                input_times=observation_times,
+                input_values=input_values,
+            )
+            sample_paths.append(sample_path.name)
+            sample_ids.append(f"sample-{sample_idx}")
+
+        manifest_path = root / "manifest.npz"
+        np.savez(
+            manifest_path,
+            sample_paths=np.asarray(sample_paths, dtype=object),
+            sample_ids=np.asarray(sample_ids, dtype=object),
+        )
+        return manifest_path
+
+    @staticmethod
+    def _weighted_residual_vector_from_best_response(best_response) -> np.ndarray:
+        parts = []
+        for rollout_entry in best_response.forward_cache.local_rollouts:
+            for state, target, weight in zip(
+                rollout_entry.observed_states,
+                rollout_entry.sample.qoi_observations,
+                rollout_entry.observation_weights,
+                strict=True,
+            ):
+                parts.append(np.sqrt(float(weight)) * (best_response.decoder.decode(state) - target))
+        if not parts:
+            return np.zeros(0, dtype=np.float64)
+        return np.concatenate(parts, axis=0)
+
+    @classmethod
+    def _reduced_residual_vector(cls, workflow, dynamics) -> np.ndarray:
+        result = workflow.evaluate_objective_and_gradient(dynamics)
+        return cls._weighted_residual_vector_from_best_response(result.best_response_context)
+
+    @staticmethod
+    def _varpro_residual_tangent_vector(prepared_state, direction: np.ndarray, decoder_direction: QuadraticDecoder, time_integrator: str) -> np.ndarray:
+        dynamics_direction = unpack_dynamics_parameter_vector(prepared_state.dynamics, direction)
+        best_response = prepared_state.result.best_response_context
+        parts = []
+        for rollout_entry in best_response.forward_cache.local_rollouts:
+            tangent_states = rollout_dynamics_parameter_tangent_from_base_rollout(
+                dynamics=prepared_state.dynamics,
+                direction=dynamics_direction,
+                base_rollout=rollout_entry.rollout,
+                input_function=rollout_entry.input_function,
+                time_integrator=time_integrator,
+            )
+            observed_tangents = tangent_states[rollout_entry.observation_indices]
+            for state, state_tangent, weight in zip(
+                rollout_entry.observed_states,
+                observed_tangents,
+                rollout_entry.observation_weights,
+                strict=True,
+            ):
+                tangent = best_response.decoder.jacobian(state) @ state_tangent + decoder_direction.decode(state)
+                parts.append(np.sqrt(float(weight)) * tangent)
+        if not parts:
+            return np.zeros(0, dtype=np.float64)
+        return np.concatenate(parts, axis=0)
 
     def _build_general_varpro_fixture(self, rng: np.random.Generator):
         r, dq = 3, 2

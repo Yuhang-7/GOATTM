@@ -197,7 +197,7 @@ class QuotientTrustRegionUpdater:
             horizontal_vector = projector.project(vector)
             if float(np.linalg.norm(horizontal_vector)) <= 0.0:
                 return np.zeros(dimension, dtype=np.float64)
-            action = workflow.evaluate_hessian_action_from_prepared_state(
+            action = workflow.evaluate_exact_varpro_hessian_action_from_prepared_state(
                 prepared_state=prepared_state,
                 direction=horizontal_vector,
             ).action
