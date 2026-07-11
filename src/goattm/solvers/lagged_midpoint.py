@@ -47,8 +47,6 @@ class LaggedMidpointForwardCache:
     stage4: np.ndarray
     linear_operators: np.ndarray
     system_matrices: np.ndarray
-    lu_factors: np.ndarray
-    pivots: np.ndarray
 
 
 def _input_at(input_function: Callable[[float], np.ndarray] | None, time: float) -> np.ndarray | None:
@@ -313,8 +311,6 @@ def _rollout_lagged_midpoint_presampled_if_available(
         stage4,
         linear_operators,
         system_matrices,
-        lu_factors,
-        pivots,
     ) = rollout_lagged_midpoint_presampled_cached_kernel(
         np.asarray(dynamics.a, dtype=np.float64),
         np.asarray(dynamics.h_matrix, dtype=np.float64),
@@ -339,8 +335,6 @@ def _rollout_lagged_midpoint_presampled_if_available(
             stage4=stage4[:accepted_steps].copy(),
             linear_operators=linear_operators[:accepted_steps].copy(),
             system_matrices=system_matrices[:accepted_steps].copy(),
-            lu_factors=lu_factors[:accepted_steps].copy(),
-            pivots=pivots[:accepted_steps].copy(),
         )
     return RolloutResult(
         success=bool(success),
@@ -550,8 +544,6 @@ def _compute_lagged_midpoint_discrete_adjoint_presampled_if_available(
             forward_cache.stage4,
             forward_cache.linear_operators,
             forward_cache.system_matrices,
-            forward_cache.lu_factors,
-            forward_cache.pivots,
         )
     return compute_lagged_midpoint_discrete_adjoint_presampled_kernel(
         np.asarray(dynamics.a, dtype=np.float64),
@@ -723,8 +715,6 @@ def rollout_lagged_midpoint_explicit_parameter_tangent_from_base_rollout(
             forward_cache.stage4,
             forward_cache.linear_operators,
             forward_cache.system_matrices,
-            forward_cache.lu_factors,
-            forward_cache.pivots,
             p0_values,
             pq_values,
             pm_values,
