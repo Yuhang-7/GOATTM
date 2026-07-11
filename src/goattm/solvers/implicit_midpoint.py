@@ -39,6 +39,9 @@ class RolloutResult:
     dt_history: np.ndarray
     times: np.ndarray
     states: np.ndarray
+    # Optional integrator-specific data retained by fast rollout kernels.
+    # Generic integrators leave this as None.
+    solver_cache: object | None = None
 
 
 def explicit_euler_guess(

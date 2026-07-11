@@ -234,8 +234,46 @@ def _rk4_half_tangent_numba(
 
 
 @njit(cache=True)
-def _lagged_midpoint_step_numba(a: np.ndarray, h: np.ndarray, b: np.ndarray, c: np.ndarray, state: np.ndarray, dt: float, p0: np.ndarray, pq: np.ndarray, pm: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    predictor, _, _, _ = _rk4_half_predictor_numba(a, h, b, c, state, dt, p0, pq, pm)
+def _rk4_half_tangent_from_cached_stages_numba(
+    a: np.ndarray,
+    h: np.ndarray,
+    delta_a: np.ndarray,
+    delta_h: np.ndarray,
+    delta_b: np.ndarray,
+    delta_c: np.ndarray,
+    state: np.ndarray,
+    state_tangent: np.ndarray,
+    dt: float,
+    p0: np.ndarray,
+    pq: np.ndarray,
+    pm: np.ndarray,
+    y2: np.ndarray,
+    y3: np.ndarray,
+    y4: np.ndarray,
+) -> np.ndarray:
+    """Propagate the RK4 predictor tangent using cached base stages."""
+    half_dt = 0.5 * dt
+    dk1 = _rhs_jacobian_action_numba(a, h, state, state_tangent) + _rhs_parameter_action_numba(
+        delta_a, delta_h, delta_b, delta_c, state, p0
+    )
+    dy2 = state_tangent + 0.5 * half_dt * dk1
+    dk2 = _rhs_jacobian_action_numba(a, h, y2, dy2) + _rhs_parameter_action_numba(
+        delta_a, delta_h, delta_b, delta_c, y2, pq
+    )
+    dy3 = state_tangent + 0.5 * half_dt * dk2
+    dk3 = _rhs_jacobian_action_numba(a, h, y3, dy3) + _rhs_parameter_action_numba(
+        delta_a, delta_h, delta_b, delta_c, y3, pq
+    )
+    dy4 = state_tangent + half_dt * dk3
+    dk4 = _rhs_jacobian_action_numba(a, h, y4, dy4) + _rhs_parameter_action_numba(
+        delta_a, delta_h, delta_b, delta_c, y4, pm
+    )
+    return state_tangent + (half_dt / 6.0) * (dk1 + 2.0 * dk2 + 2.0 * dk3 + dk4)
+
+
+@njit(cache=True)
+def _lagged_midpoint_step_numba(a: np.ndarray, h: np.ndarray, b: np.ndarray, c: np.ndarray, state: np.ndarray, dt: float, p0: np.ndarray, pq: np.ndarray, pm: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    predictor, y2, y3, y4 = _rk4_half_predictor_numba(a, h, b, c, state, dt, p0, pq, pm)
     linear_operator = a + _bilinear_action_numba(h, predictor)
     r = state.shape[0]
     half_dt = 0.5 * dt
@@ -249,7 +287,7 @@ def _lagged_midpoint_step_numba(a: np.ndarray, h: np.ndarray, b: np.ndarray, c: 
         for col in range(r):
             rhs[row] += half_dt * linear_operator[row, col] * state[col]
     next_state = np.linalg.solve(system, rhs)
-    return next_state, predictor, linear_operator, system
+    return next_state, predictor, y2, y3, y4, linear_operator, system
 
 
 @njit(cache=True)
@@ -261,7 +299,7 @@ def rollout_lagged_midpoint_presampled_kernel(a: np.ndarray, h: np.ndarray, b: n
     accepted = 0
     success = True
     for step in range(n_steps):
-        next_state, _, _, _ = _lagged_midpoint_step_numba(a, h, b, c, states[step], dt_history[step], p0_values[step], pq_values[step], pm_values[step])
+        next_state, _, _, _, _, _, _ = _lagged_midpoint_step_numba(a, h, b, c, states[step], dt_history[step], p0_values[step], pq_values[step], pm_values[step])
         finite = True
         for i in range(r):
             if not np.isfinite(next_state[i]):
@@ -272,6 +310,53 @@ def rollout_lagged_midpoint_presampled_kernel(a: np.ndarray, h: np.ndarray, b: n
         states[step + 1, :] = next_state
         accepted += 1
     return success, accepted, states
+
+
+@njit(cache=True)
+def rollout_lagged_midpoint_presampled_cached_kernel(
+    a: np.ndarray,
+    h: np.ndarray,
+    b: np.ndarray,
+    c: np.ndarray,
+    u0: np.ndarray,
+    dt_history: np.ndarray,
+    p0_values: np.ndarray,
+    pq_values: np.ndarray,
+    pm_values: np.ndarray,
+) -> tuple[bool, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Roll out and retain the stages needed by reverse/tangent kernels."""
+    n_steps = dt_history.shape[0]
+    r = u0.shape[0]
+    states = np.zeros((n_steps + 1, r), dtype=np.float64)
+    predictors = np.zeros((n_steps, r), dtype=np.float64)
+    stage2 = np.zeros((n_steps, r), dtype=np.float64)
+    stage3 = np.zeros((n_steps, r), dtype=np.float64)
+    stage4 = np.zeros((n_steps, r), dtype=np.float64)
+    linear_operators = np.zeros((n_steps, r, r), dtype=np.float64)
+    system_matrices = np.zeros((n_steps, r, r), dtype=np.float64)
+    states[0, :] = u0
+    accepted = 0
+    success = True
+    for step in range(n_steps):
+        next_state, predictor, y2, y3, y4, linear_operator, system = _lagged_midpoint_step_numba(
+            a, h, b, c, states[step], dt_history[step], p0_values[step], pq_values[step], pm_values[step]
+        )
+        finite = True
+        for i in range(r):
+            if not np.isfinite(next_state[i]):
+                finite = False
+        if not finite:
+            success = False
+            break
+        states[step + 1, :] = next_state
+        predictors[step, :] = predictor
+        stage2[step, :] = y2
+        stage3[step, :] = y3
+        stage4[step, :] = y4
+        linear_operators[step, :, :] = linear_operator
+        system_matrices[step, :, :] = system
+        accepted += 1
+    return success, accepted, states, predictors, stage2, stage3, stage4, linear_operators, system_matrices
 
 
 @njit(cache=True)
@@ -335,6 +420,59 @@ def rollout_lagged_midpoint_explicit_parameter_tangent_presampled_kernel(
 
 
 @njit(cache=True)
+def rollout_lagged_midpoint_explicit_parameter_tangent_cached_kernel(
+    a: np.ndarray,
+    h: np.ndarray,
+    delta_a: np.ndarray,
+    delta_h: np.ndarray,
+    delta_b: np.ndarray,
+    delta_c: np.ndarray,
+    states: np.ndarray,
+    dt_history: np.ndarray,
+    predictors: np.ndarray,
+    stage2: np.ndarray,
+    stage3: np.ndarray,
+    stage4: np.ndarray,
+    linear_operators: np.ndarray,
+    system_matrices: np.ndarray,
+    p0_values: np.ndarray,
+    pq_values: np.ndarray,
+    pm_values: np.ndarray,
+) -> np.ndarray:
+    """Tangent rollout reusing the base RK4 stages and linear systems."""
+    n_steps = dt_history.shape[0]
+    r = states.shape[1]
+    tangent_states = np.zeros_like(states)
+    current_tangent = np.zeros(r, dtype=np.float64)
+    for step in range(n_steps):
+        state = states[step]
+        next_state = states[step + 1]
+        dt = dt_history[step]
+        half_dt = 0.5 * dt
+        predictor_tangent = _rk4_half_tangent_from_cached_stages_numba(
+            a, h, delta_a, delta_h, delta_b, delta_c, state, current_tangent, dt,
+            p0_values[step], pq_values[step], pm_values[step],
+            stage2[step], stage3[step], stage4[step],
+        )
+        linear_operator = linear_operators[step]
+        linear_operator_tangent = (
+            _bilinear_action_numba(h, predictor_tangent)
+            + delta_a
+            + _bilinear_action_numba(delta_h, predictors[step])
+        )
+        forcing_tangent = delta_c.copy()
+        for row in range(r):
+            for col in range(pm_values.shape[1]):
+                forcing_tangent[row] += delta_b[row, col] * pm_values[step, col]
+        rhs_tangent = current_tangent + half_dt * (linear_operator @ current_tangent)
+        rhs_tangent += half_dt * (linear_operator_tangent @ (state + next_state))
+        rhs_tangent += dt * forcing_tangent
+        current_tangent = np.linalg.solve(system_matrices[step], rhs_tangent)
+        tangent_states[step + 1, :] = current_tangent
+    return tangent_states
+
+
+@njit(cache=True)
 def _accumulate_bilinear_reverse_numba(h: np.ndarray, predictor: np.ndarray, operator_bar: np.ndarray, h_grad: np.ndarray) -> np.ndarray:
     r = predictor.shape[0]
     z_bar = np.zeros(r, dtype=np.float64)
@@ -348,6 +486,25 @@ def _accumulate_bilinear_reverse_numba(h: np.ndarray, predictor: np.ndarray, ope
                     z_bar[i] += operator_bar[row, i] * coeff
                 else:
                     h_grad[row, idx] += 0.5 * (operator_bar[row, i] * predictor[j] + operator_bar[row, j] * predictor[i])
+                    z_bar[j] += 0.5 * operator_bar[row, i] * coeff
+                    z_bar[i] += 0.5 * operator_bar[row, j] * coeff
+                idx += 1
+    return z_bar
+
+
+@njit(cache=True)
+def _bilinear_reverse_state_numba(h: np.ndarray, predictor: np.ndarray, operator_bar: np.ndarray) -> np.ndarray:
+    """Reverse only the state dependence of the bilinear operator."""
+    r = predictor.shape[0]
+    z_bar = np.zeros(r, dtype=np.float64)
+    for row in range(r):
+        idx = 0
+        for i in range(r):
+            for j in range(i + 1):
+                coeff = h[row, idx]
+                if i == j:
+                    z_bar[i] += operator_bar[row, i] * coeff
+                else:
                     z_bar[j] += 0.5 * operator_bar[row, i] * coeff
                     z_bar[i] += 0.5 * operator_bar[row, j] * coeff
                 idx += 1
@@ -409,6 +566,42 @@ def _rk4_half_reverse_numba(a: np.ndarray, h: np.ndarray, b: np.ndarray, c: np.n
 
 
 @njit(cache=True)
+def _rk4_half_reverse_state_cached_numba(
+    a: np.ndarray,
+    h: np.ndarray,
+    state: np.ndarray,
+    dt: float,
+    predictor_bar: np.ndarray,
+    y2: np.ndarray,
+    y3: np.ndarray,
+    y4: np.ndarray,
+) -> np.ndarray:
+    """Reverse the predictor using cached RK4 stage states and no parameter gradients."""
+    half_dt = 0.5 * dt
+    state_bar = predictor_bar.copy()
+    k1_bar = (half_dt / 6.0) * predictor_bar
+    k2_bar = (half_dt / 3.0) * predictor_bar
+    k3_bar = (half_dt / 3.0) * predictor_bar
+    k4_bar = (half_dt / 6.0) * predictor_bar
+
+    y4_bar = _rhs_jacobian_transpose_action_numba(a, h, y4, k4_bar)
+    state_bar += y4_bar
+    k3_bar = k3_bar + half_dt * y4_bar
+
+    y3_bar = _rhs_jacobian_transpose_action_numba(a, h, y3, k3_bar)
+    state_bar += y3_bar
+    k2_bar = k2_bar + 0.5 * half_dt * y3_bar
+
+    y2_bar = _rhs_jacobian_transpose_action_numba(a, h, y2, k2_bar)
+    state_bar += y2_bar
+    k1_bar = k1_bar + 0.5 * half_dt * y2_bar
+
+    y1_bar = _rhs_jacobian_transpose_action_numba(a, h, state, k1_bar)
+    state_bar += y1_bar
+    return state_bar
+
+
+@njit(cache=True)
 def _lagged_midpoint_reverse_step_numba(a: np.ndarray, h: np.ndarray, b: np.ndarray, c: np.ndarray, previous_state: np.ndarray, next_state: np.ndarray, dt: float, p0: np.ndarray, pq: np.ndarray, pm: np.ndarray, adjoint_next: np.ndarray, accumulate_parameters: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     predictor, _, _, _ = _rk4_half_predictor_numba(a, h, b, c, previous_state, dt, p0, pq, pm)
     linear_operator = a + _bilinear_action_numba(h, predictor)
@@ -443,12 +636,63 @@ def _lagged_midpoint_reverse_step_numba(a: np.ndarray, h: np.ndarray, b: np.ndar
 
 
 @njit(cache=True)
+def _lagged_midpoint_reverse_state_cached_numba(
+    a: np.ndarray,
+    h: np.ndarray,
+    previous_state: np.ndarray,
+    next_state: np.ndarray,
+    dt: float,
+    predictor: np.ndarray,
+    y2: np.ndarray,
+    y3: np.ndarray,
+    y4: np.ndarray,
+    linear_operator: np.ndarray,
+    system: np.ndarray,
+    adjoint_next: np.ndarray,
+) -> np.ndarray:
+    half_dt = 0.5 * dt
+    alpha = np.linalg.solve(system.T, adjoint_next)
+    operator_bar = half_dt * (np.outer(alpha, previous_state) + np.outer(alpha, next_state))
+    state_bar = alpha + half_dt * (linear_operator.T @ alpha)
+    predictor_bar = _bilinear_reverse_state_numba(h, predictor, operator_bar)
+    return state_bar + _rk4_half_reverse_state_cached_numba(
+        a, h, previous_state, dt, predictor_bar, y2, y3, y4
+    )
+
+
+@njit(cache=True)
 def compute_lagged_midpoint_discrete_adjoint_presampled_kernel(a: np.ndarray, h: np.ndarray, b: np.ndarray, c: np.ndarray, states: np.ndarray, dt_history: np.ndarray, state_loss_gradients: np.ndarray, p0_values: np.ndarray, pq_values: np.ndarray, pm_values: np.ndarray) -> np.ndarray:
     adjoints = np.zeros_like(states)
     adjoints[-1, :] = state_loss_gradients[-1, :]
     for step in range(dt_history.shape[0] - 1, -1, -1):
         state_bar, _, _, _, _ = _lagged_midpoint_reverse_step_numba(
             a, h, b, c, states[step], states[step + 1], dt_history[step], p0_values[step], pq_values[step], pm_values[step], adjoints[step + 1], False
+        )
+        adjoints[step, :] = state_loss_gradients[step, :] + state_bar
+    return adjoints
+
+
+@njit(cache=True)
+def compute_lagged_midpoint_discrete_adjoint_cached_presampled_kernel(
+    a: np.ndarray,
+    h: np.ndarray,
+    states: np.ndarray,
+    dt_history: np.ndarray,
+    state_loss_gradients: np.ndarray,
+    predictors: np.ndarray,
+    stage2: np.ndarray,
+    stage3: np.ndarray,
+    stage4: np.ndarray,
+    linear_operators: np.ndarray,
+    system_matrices: np.ndarray,
+) -> np.ndarray:
+    adjoints = np.zeros_like(states)
+    adjoints[-1, :] = state_loss_gradients[-1, :]
+    for step in range(dt_history.shape[0] - 1, -1, -1):
+        state_bar = _lagged_midpoint_reverse_state_cached_numba(
+            a, h, states[step], states[step + 1], dt_history[step],
+            predictors[step], stage2[step], stage3[step], stage4[step],
+            linear_operators[step], system_matrices[step], adjoints[step + 1],
         )
         adjoints[step, :] = state_loss_gradients[step, :] + state_bar
     return adjoints

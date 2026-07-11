@@ -2419,6 +2419,7 @@ def rollout_dynamics_parameter_tangent_from_base_rollout(
             delta_b=direction.b,
             delta_c=direction.c,
             input_function=input_function,
+            forward_cache=getattr(base_rollout, "solver_cache", None),
         )
         if fast_tangent_states is not None:
             return fast_tangent_states
@@ -2791,6 +2792,7 @@ def _dynamics_gradients_from_state_loss_gradients(
             dt_history=rollout.dt_history,
             state_loss_gradients=state_loss_gradients,
             input_function=input_function,
+            forward_cache=getattr(rollout, "solver_cache", None),
         )
         a_grad, h_grad, b_grad, c_grad = accumulate_lagged_midpoint_parameter_gradients(
             dynamics=dynamics,

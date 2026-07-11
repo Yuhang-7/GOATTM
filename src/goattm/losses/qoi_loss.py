@@ -389,6 +389,7 @@ def _rollout_result_to_loss_and_gradients(
             dt_history=rollout.dt_history,
             state_loss_gradients=full_state_loss_gradients,
             input_function=input_function,
+            forward_cache=getattr(rollout, "solver_cache", None),
         )
         a_grad, h_grad, b_grad, c_grad = accumulate_lagged_midpoint_parameter_gradients(
             dynamics=dynamics,

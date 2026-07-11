@@ -12,11 +12,14 @@ from goattm.runtime import timed
 from goattm.solvers.implicit_midpoint import RolloutResult
 from goattm.solvers.lagged_midpoint_numba import (
     accumulate_lagged_midpoint_parameter_gradients_presampled_kernel,
+    compute_lagged_midpoint_discrete_adjoint_cached_presampled_kernel,
     compute_lagged_midpoint_discrete_adjoint_presampled_kernel,
     lagged_midpoint_final_time_grid,
     lagged_midpoint_time_grid,
     presample_lagged_midpoint_inputs,
+    rollout_lagged_midpoint_explicit_parameter_tangent_cached_kernel,
     rollout_lagged_midpoint_presampled_kernel,
+    rollout_lagged_midpoint_presampled_cached_kernel,
     rollout_lagged_midpoint_explicit_parameter_tangent_presampled_kernel,
 )
 from goattm.solvers.rk4 import _rk4_reverse_step, rk4_step_with_stages
@@ -32,6 +35,18 @@ class LaggedMidpointStepCache:
     rhs: np.ndarray
     time: float
     dt: float
+
+
+@dataclass(frozen=True)
+class LaggedMidpointForwardCache:
+    """Per-step data retained so tangent and adjoint solves do not replay forward."""
+
+    predictors: np.ndarray
+    stage2: np.ndarray
+    stage3: np.ndarray
+    stage4: np.ndarray
+    linear_operators: np.ndarray
+    system_matrices: np.ndarray
 
 
 def _input_at(input_function: Callable[[float], np.ndarray] | None, time: float) -> np.ndarray | None:
@@ -286,7 +301,17 @@ def _rollout_lagged_midpoint_presampled_if_available(
         if dynamics.b is None
         else np.asarray(dynamics.b, dtype=np.float64)
     )
-    success, accepted, states = rollout_lagged_midpoint_presampled_kernel(
+    (
+        success,
+        accepted,
+        states,
+        predictors,
+        stage2,
+        stage3,
+        stage4,
+        linear_operators,
+        system_matrices,
+    ) = rollout_lagged_midpoint_presampled_cached_kernel(
         np.asarray(dynamics.a, dtype=np.float64),
         np.asarray(dynamics.h_matrix, dtype=np.float64),
         b_matrix,
@@ -301,6 +326,16 @@ def _rollout_lagged_midpoint_presampled_if_available(
     stored_states = states[: accepted_steps + 1].copy()
     stored_times = times[: accepted_steps + 1].copy()
     stored_dt_history = dt_history[:accepted_steps].copy()
+    solver_cache = None
+    if bool(success):
+        solver_cache = LaggedMidpointForwardCache(
+            predictors=predictors[:accepted_steps].copy(),
+            stage2=stage2[:accepted_steps].copy(),
+            stage3=stage3[:accepted_steps].copy(),
+            stage4=stage4[:accepted_steps].copy(),
+            linear_operators=linear_operators[:accepted_steps].copy(),
+            system_matrices=system_matrices[:accepted_steps].copy(),
+        )
     return RolloutResult(
         success=bool(success),
         accepted_steps=accepted_steps,
@@ -310,6 +345,7 @@ def _rollout_lagged_midpoint_presampled_if_available(
         dt_history=stored_dt_history,
         times=stored_times,
         states=stored_states,
+        solver_cache=solver_cache,
     )
 
 
@@ -386,6 +422,7 @@ def compute_lagged_midpoint_discrete_adjoint(
     dt_history: np.ndarray,
     state_loss_gradients: np.ndarray,
     input_function: Callable[[float], np.ndarray] | None = None,
+    forward_cache: LaggedMidpointForwardCache | None = None,
 ) -> np.ndarray:
     if states.ndim != 2 or states.shape[0] < 1:
         raise ValueError(f"states must have shape (N, r), got {states.shape}")
@@ -403,6 +440,7 @@ def compute_lagged_midpoint_discrete_adjoint(
         dt_history=dt_history,
         state_loss_gradients=state_loss_gradients,
         input_function=input_function,
+        forward_cache=forward_cache,
     )
     if fast_adjoint is not None:
         return fast_adjoint
@@ -482,6 +520,7 @@ def _compute_lagged_midpoint_discrete_adjoint_presampled_if_available(
     dt_history: np.ndarray,
     state_loss_gradients: np.ndarray,
     input_function: Callable[[float], np.ndarray] | None,
+    forward_cache: LaggedMidpointForwardCache | None = None,
 ) -> np.ndarray | None:
     presampled = presample_lagged_midpoint_inputs(
         input_function=input_function,
@@ -492,6 +531,20 @@ def _compute_lagged_midpoint_discrete_adjoint_presampled_if_available(
     if presampled is None:
         return None
     p0_values, pq_values, pm_values = presampled
+    if forward_cache is not None:
+        return compute_lagged_midpoint_discrete_adjoint_cached_presampled_kernel(
+            np.asarray(dynamics.a, dtype=np.float64),
+            np.asarray(dynamics.h_matrix, dtype=np.float64),
+            np.asarray(states, dtype=np.float64),
+            np.asarray(dt_history, dtype=np.float64),
+            np.asarray(state_loss_gradients, dtype=np.float64),
+            forward_cache.predictors,
+            forward_cache.stage2,
+            forward_cache.stage3,
+            forward_cache.stage4,
+            forward_cache.linear_operators,
+            forward_cache.system_matrices,
+        )
     return compute_lagged_midpoint_discrete_adjoint_presampled_kernel(
         np.asarray(dynamics.a, dtype=np.float64),
         np.asarray(dynamics.h_matrix, dtype=np.float64),
@@ -607,6 +660,7 @@ def rollout_lagged_midpoint_explicit_parameter_tangent_from_base_rollout(
     delta_b: np.ndarray | None,
     delta_c: np.ndarray,
     input_function: Callable[[float], np.ndarray] | None = None,
+    forward_cache: LaggedMidpointForwardCache | None = None,
 ) -> np.ndarray | None:
     """Fast lagged-midpoint tangent rollout for explicit parameter directions.
 
@@ -645,6 +699,26 @@ def rollout_lagged_midpoint_explicit_parameter_tangent_from_base_rollout(
         if delta_b is None
         else np.asarray(delta_b, dtype=np.float64)
     )
+    if forward_cache is not None:
+        return rollout_lagged_midpoint_explicit_parameter_tangent_cached_kernel(
+            np.asarray(dynamics.a, dtype=np.float64),
+            np.asarray(dynamics.h_matrix, dtype=np.float64),
+            np.asarray(delta_a, dtype=np.float64),
+            np.asarray(delta_h, dtype=np.float64),
+            delta_b_matrix,
+            np.asarray(delta_c, dtype=np.float64),
+            np.asarray(base_rollout.states, dtype=np.float64),
+            np.asarray(base_rollout.dt_history, dtype=np.float64),
+            forward_cache.predictors,
+            forward_cache.stage2,
+            forward_cache.stage3,
+            forward_cache.stage4,
+            forward_cache.linear_operators,
+            forward_cache.system_matrices,
+            p0_values,
+            pq_values,
+            pm_values,
+        )
     return rollout_lagged_midpoint_explicit_parameter_tangent_presampled_kernel(
         np.asarray(dynamics.a, dtype=np.float64),
         np.asarray(dynamics.h_matrix, dtype=np.float64),
