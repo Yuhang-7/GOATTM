@@ -13,6 +13,7 @@ from goattm.solvers.implicit_midpoint import RolloutResult
 from goattm.solvers.lagged_midpoint_numba import (
     accumulate_lagged_midpoint_parameter_gradients_presampled_kernel,
     compute_lagged_midpoint_discrete_adjoint_cached_presampled_kernel,
+    compute_lagged_midpoint_incremental_discrete_adjoint_cached_presampled_kernel,
     compute_lagged_midpoint_discrete_adjoint_presampled_kernel,
     lagged_midpoint_final_time_grid,
     lagged_midpoint_time_grid,
@@ -51,6 +52,10 @@ class LaggedMidpointForwardCache:
     jacobian2: np.ndarray
     jacobian3: np.ndarray
     jacobian4: np.ndarray
+    feature1: np.ndarray
+    feature2: np.ndarray
+    feature3: np.ndarray
+    feature4: np.ndarray
 
 
 def _input_at(input_function: Callable[[float], np.ndarray] | None, time: float) -> np.ndarray | None:
@@ -319,6 +324,10 @@ def _rollout_lagged_midpoint_presampled_if_available(
         jacobian2,
         jacobian3,
         jacobian4,
+        feature1,
+        feature2,
+        feature3,
+        feature4,
     ) = rollout_lagged_midpoint_presampled_cached_kernel(
         np.asarray(dynamics.a, dtype=np.float64),
         np.asarray(dynamics.h_matrix, dtype=np.float64),
@@ -347,6 +356,10 @@ def _rollout_lagged_midpoint_presampled_if_available(
             jacobian2=jacobian2[:accepted_steps].copy(),
             jacobian3=jacobian3[:accepted_steps].copy(),
             jacobian4=jacobian4[:accepted_steps].copy(),
+            feature1=feature1[:accepted_steps].copy(),
+            feature2=feature2[:accepted_steps].copy(),
+            feature3=feature3[:accepted_steps].copy(),
+            feature4=feature4[:accepted_steps].copy(),
         )
     return RolloutResult(
         success=bool(success),
@@ -471,6 +484,82 @@ def compute_lagged_midpoint_discrete_adjoint(
         )
         adjoints[step_idx] = np.asarray(state_loss_gradients[step_idx], dtype=np.float64) + state_bar
     return adjoints
+
+
+@timed("goattm.solvers.compute_lagged_midpoint_incremental_discrete_adjoint")
+def compute_lagged_midpoint_incremental_discrete_adjoint(
+    dynamics: QuadraticDynamics,
+    rollout: RolloutResult,
+    tangent_states: np.ndarray,
+    base_adjoints: np.ndarray,
+    state_loss_gradient_direction: np.ndarray,
+    delta_a: np.ndarray,
+    delta_h: np.ndarray,
+    delta_b: np.ndarray | None,
+    delta_c: np.ndarray,
+    input_function: Callable[[float], np.ndarray] | None = None,
+    forward_cache: LaggedMidpointForwardCache | None = None,
+) -> np.ndarray:
+    """Differentiate the lagged-midpoint discrete adjoint recursion.
+
+    This is the exact directional derivative of the discrete reverse pass for
+    the supplied trajectory. It reuses the base forward stages and Jacobians;
+    no perturbed rollout or finite-difference reverse solve is performed.
+    """
+    if not rollout.success:
+        raise RuntimeError("Cannot compute an incremental adjoint from an unsuccessful rollout.")
+    if tangent_states.shape != rollout.states.shape:
+        raise ValueError(f"tangent_states must have shape {rollout.states.shape}, got {tangent_states.shape}")
+    if base_adjoints.shape != rollout.states.shape:
+        raise ValueError(f"base_adjoints must have shape {rollout.states.shape}, got {base_adjoints.shape}")
+    if state_loss_gradient_direction.shape != rollout.states.shape:
+        raise ValueError(
+            "state_loss_gradient_direction must have shape "
+            f"{rollout.states.shape}, got {state_loss_gradient_direction.shape}"
+        )
+    cache = forward_cache if forward_cache is not None else rollout.solver_cache
+    if not isinstance(cache, LaggedMidpointForwardCache):
+        raise ValueError("A LaggedMidpointForwardCache is required for the incremental adjoint.")
+    presampled = presample_lagged_midpoint_inputs(
+        input_function=input_function,
+        times=rollout.times,
+        dt_history=rollout.dt_history,
+        input_dimension=dynamics.input_dimension,
+    )
+    if presampled is None:
+        raise ValueError("The input function must support lagged-midpoint pre-sampling.")
+    p0_values, pq_values, pm_values = presampled
+    b_matrix = _dynamics_b_matrix_for_numba(dynamics)
+    delta_b_matrix = np.zeros_like(b_matrix) if delta_b is None else np.asarray(delta_b, dtype=np.float64)
+    return compute_lagged_midpoint_incremental_discrete_adjoint_cached_presampled_kernel(
+        np.asarray(dynamics.h_matrix, dtype=np.float64),
+        np.asarray(delta_a, dtype=np.float64),
+        np.asarray(delta_h, dtype=np.float64),
+        delta_b_matrix,
+        np.asarray(delta_c, dtype=np.float64),
+        np.asarray(rollout.states, dtype=np.float64),
+        np.asarray(tangent_states, dtype=np.float64),
+        np.asarray(rollout.dt_history, dtype=np.float64),
+        np.asarray(base_adjoints, dtype=np.float64),
+        np.asarray(state_loss_gradient_direction, dtype=np.float64),
+        cache.predictors,
+        cache.stage2,
+        cache.stage3,
+        cache.stage4,
+        cache.linear_operators,
+        cache.system_matrices,
+        cache.jacobian1,
+        cache.jacobian2,
+        cache.jacobian3,
+        cache.jacobian4,
+        cache.feature1,
+        cache.feature2,
+        cache.feature3,
+        cache.feature4,
+        p0_values,
+        pq_values,
+        pm_values,
+    )
 
 
 @timed("goattm.solvers.accumulate_lagged_midpoint_parameter_gradients")
@@ -735,6 +824,10 @@ def rollout_lagged_midpoint_explicit_parameter_tangent_from_base_rollout(
             forward_cache.jacobian2,
             forward_cache.jacobian3,
             forward_cache.jacobian4,
+            forward_cache.feature1,
+            forward_cache.feature2,
+            forward_cache.feature3,
+            forward_cache.feature4,
             p0_values,
             pq_values,
             pm_values,

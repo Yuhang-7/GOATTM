@@ -27,6 +27,11 @@ from goattm.problems.reduced_qoi_best_response import (  # noqa: E402
     unpack_dynamics_parameter_vector,
 )
 from goattm.runtime.distributed import DistributedContext  # noqa: E402
+from goattm.solvers.lagged_midpoint import (  # noqa: E402
+    compute_lagged_midpoint_discrete_adjoint,
+    compute_lagged_midpoint_incremental_discrete_adjoint,
+    rollout_lagged_midpoint_explicit_parameter_tangent_from_base_rollout,
+)
 from goattm.solvers.time_integration import rollout_tangent_from_base_rollout, rollout_to_observation_times  # noqa: E402
 from goattm.train.quotient_trust_region import quotient_vertical_basis  # noqa: E402
 
@@ -255,6 +260,98 @@ class GeneralQuadraticDynamicsTest(unittest.TestCase):
         slope = self._fit_slope(eps_values, np.asarray(errors, dtype=np.float64))
         self.assertGreaterEqual(slope, 0.80)
         self.assertLessEqual(slope, 1.20)
+
+    def test_lagged_midpoint_incremental_adjoint_matches_finite_difference(self) -> None:
+        rng = np.random.default_rng(9112)
+        r = 4
+        dynamics = GeneralQuadraticDynamics(
+            a=-0.12 * np.eye(r) + 0.015 * rng.standard_normal((r, r)),
+            h_matrix=0.01 * rng.standard_normal((r, compressed_quadratic_dimension(r))),
+            b=None,
+            c=0.01 * rng.standard_normal(r),
+        )
+        observation_times = np.linspace(0.0, 0.24, 7)
+        u0 = 0.04 * rng.standard_normal(r)
+        base_rollout, _ = rollout_to_observation_times(
+            dynamics=dynamics,
+            u0=u0,
+            observation_times=observation_times,
+            max_dt=0.02,
+            input_function=None,
+            time_integrator="lagged_midpoint",
+        )
+        direction_vector = rng.standard_normal(dynamics_parameter_vector(dynamics).shape)
+        direction_vector /= np.linalg.norm(direction_vector)
+        direction = unpack_dynamics_parameter_vector(dynamics, direction_vector)
+        tangent_states = rollout_lagged_midpoint_explicit_parameter_tangent_from_base_rollout(
+            dynamics=dynamics,
+            base_rollout=base_rollout,
+            delta_a=direction.a,
+            delta_h=direction.h_matrix,
+            delta_b=None,
+            delta_c=direction.c,
+            input_function=None,
+            forward_cache=base_rollout.solver_cache,
+        )
+        self.assertIsNotNone(tangent_states)
+
+        loss_matrix = rng.standard_normal((r, r))
+        state_loss_gradients = base_rollout.states @ loss_matrix.T
+        state_loss_gradient_direction = tangent_states @ loss_matrix.T
+        base_adjoints = compute_lagged_midpoint_discrete_adjoint(
+            dynamics=dynamics,
+            states=base_rollout.states,
+            times=base_rollout.times,
+            dt_history=base_rollout.dt_history,
+            state_loss_gradients=state_loss_gradients,
+            input_function=None,
+            forward_cache=base_rollout.solver_cache,
+        )
+        incremental_adjoints = compute_lagged_midpoint_incremental_discrete_adjoint(
+            dynamics=dynamics,
+            rollout=base_rollout,
+            tangent_states=tangent_states,
+            base_adjoints=base_adjoints,
+            state_loss_gradient_direction=state_loss_gradient_direction,
+            delta_a=direction.a,
+            delta_h=direction.h_matrix,
+            delta_b=None,
+            delta_c=direction.c,
+            input_function=None,
+            forward_cache=base_rollout.solver_cache,
+        )
+
+        base_vector = dynamics_parameter_vector(dynamics)
+        epsilon = 2.0e-6
+        perturbed_adjoints = []
+        for sign in (-1.0, 1.0):
+            perturbed = dynamics_from_parameter_vector(
+                dynamics, base_vector + sign * epsilon * direction_vector
+            )
+            rollout, _ = rollout_to_observation_times(
+                dynamics=perturbed,
+                u0=u0,
+                observation_times=observation_times,
+                max_dt=0.02,
+                input_function=None,
+                time_integrator="lagged_midpoint",
+            )
+            perturbed_adjoints.append(
+                compute_lagged_midpoint_discrete_adjoint(
+                    dynamics=perturbed,
+                    states=rollout.states,
+                    times=rollout.times,
+                    dt_history=rollout.dt_history,
+                    state_loss_gradients=rollout.states @ loss_matrix.T,
+                    input_function=None,
+                    forward_cache=rollout.solver_cache,
+                )
+            )
+        finite_difference = (perturbed_adjoints[1] - perturbed_adjoints[0]) / (2.0 * epsilon)
+        relative_error = np.linalg.norm(finite_difference - incremental_adjoints) / max(
+            1.0, np.linalg.norm(finite_difference)
+        )
+        self.assertLess(relative_error, 2.0e-7)
 
     def test_general_quadratic_varpro_gauss_newton_action_is_symmetric_and_matches_qform(self) -> None:
         rng = np.random.default_rng(9103)
