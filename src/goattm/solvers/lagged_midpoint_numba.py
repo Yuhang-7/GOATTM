@@ -195,30 +195,29 @@ def _rhs_jacobian_matrix_numba(a: np.ndarray, h: np.ndarray, u: np.ndarray) -> n
 
 
 @njit(cache=True)
-def _rhs_jacobian_direction_transpose_action_numba(
+def _rhs_jacobian_direction_matrix_numba(
     h: np.ndarray,
     delta_a: np.ndarray,
     delta_h: np.ndarray,
     state: np.ndarray,
     state_tangent: np.ndarray,
-    vector: np.ndarray,
 ) -> np.ndarray:
-    """Apply the transpose directional state-Jacobian derivative."""
+    """Directional derivative of the state Jacobian."""
     r = state.shape[0]
-    out = np.zeros(r, dtype=np.float64)
+    out = delta_a.copy()
     for row in range(r):
-        for col in range(r):
-            out[col] += delta_a[row, col] * vector[row]
         idx = 0
         for i in range(r):
             for j in range(i + 1):
-                coeff = delta_h[row, idx] * state[j] + h[row, idx] * state_tangent[j]
+                coeff = delta_h[row, idx]
+                state_coeff = h[row, idx]
                 if i == j:
-                    out[i] += 2.0 * coeff * vector[row]
+                    out[row, i] += 2.0 * (
+                        coeff * state[i] + state_coeff * state_tangent[i]
+                    )
                 else:
-                    out[i] += coeff * vector[row]
-                    other_coeff = delta_h[row, idx] * state[i] + h[row, idx] * state_tangent[i]
-                    out[j] += other_coeff * vector[row]
+                    out[row, i] += coeff * state[j] + state_coeff * state_tangent[j]
+                    out[row, j] += coeff * state[i] + state_coeff * state_tangent[i]
                 idx += 1
     return out
 
@@ -804,33 +803,29 @@ def _rk4_half_reverse_state_direction_cached_numba(
     delta_k4_bar = (half_dt / 6.0) * predictor_bar_tangent
     state_bar_tangent = predictor_bar_tangent.copy()
 
+    delta_j4 = _rhs_jacobian_direction_matrix_numba(h, delta_a, delta_h, y4, y4_tangent)
     y4_bar = jacobian4.T @ k4_bar
-    delta_y4_bar = jacobian4.T @ delta_k4_bar + _rhs_jacobian_direction_transpose_action_numba(
-        h, delta_a, delta_h, y4, y4_tangent, k4_bar
-    )
+    delta_y4_bar = jacobian4.T @ delta_k4_bar + delta_j4.T @ k4_bar
     state_bar_tangent += delta_y4_bar
     k3_bar += half_dt * y4_bar
     delta_k3_bar += half_dt * delta_y4_bar
 
+    delta_j3 = _rhs_jacobian_direction_matrix_numba(h, delta_a, delta_h, y3, y3_tangent)
     y3_bar = jacobian3.T @ k3_bar
-    delta_y3_bar = jacobian3.T @ delta_k3_bar + _rhs_jacobian_direction_transpose_action_numba(
-        h, delta_a, delta_h, y3, y3_tangent, k3_bar
-    )
+    delta_y3_bar = jacobian3.T @ delta_k3_bar + delta_j3.T @ k3_bar
     state_bar_tangent += delta_y3_bar
     k2_bar += 0.5 * half_dt * y3_bar
     delta_k2_bar += 0.5 * half_dt * delta_y3_bar
 
+    delta_j2 = _rhs_jacobian_direction_matrix_numba(h, delta_a, delta_h, y2, y2_tangent)
     y2_bar = jacobian2.T @ k2_bar
-    delta_y2_bar = jacobian2.T @ delta_k2_bar + _rhs_jacobian_direction_transpose_action_numba(
-        h, delta_a, delta_h, y2, y2_tangent, k2_bar
-    )
+    delta_y2_bar = jacobian2.T @ delta_k2_bar + delta_j2.T @ k2_bar
     state_bar_tangent += delta_y2_bar
     k1_bar += 0.5 * half_dt * y2_bar
     delta_k1_bar += 0.5 * half_dt * delta_y2_bar
 
-    state_bar_tangent += jacobian1.T @ delta_k1_bar + _rhs_jacobian_direction_transpose_action_numba(
-        h, delta_a, delta_h, state, state_tangent, k1_bar
-    )
+    delta_j1 = _rhs_jacobian_direction_matrix_numba(h, delta_a, delta_h, state, state_tangent)
+    state_bar_tangent += jacobian1.T @ delta_k1_bar + delta_j1.T @ k1_bar
     return state_bar_tangent
 
 
