@@ -12,6 +12,7 @@ from goattm.runtime import timed
 from goattm.solvers.implicit_midpoint import RolloutResult
 from goattm.solvers.lagged_midpoint_numba import (
     accumulate_lagged_midpoint_parameter_gradients_presampled_kernel,
+    accumulate_lagged_midpoint_parameter_gradients_cached_presampled_kernel,
     compute_lagged_midpoint_discrete_adjoint_cached_presampled_kernel,
     compute_lagged_midpoint_incremental_discrete_adjoint_cached_presampled_kernel,
     compute_lagged_midpoint_discrete_adjoint_presampled_kernel,
@@ -679,18 +680,48 @@ def _accumulate_lagged_midpoint_parameter_gradients_presampled_if_available(
     if presampled is None:
         return None
     p0_values, pq_values, pm_values = presampled
-    a_grad, h_grad, b_grad, c_grad = accumulate_lagged_midpoint_parameter_gradients_presampled_kernel(
-        np.asarray(dynamics.a, dtype=np.float64),
-        np.asarray(dynamics.h_matrix, dtype=np.float64),
-        _dynamics_b_matrix_for_numba(dynamics),
-        np.asarray(dynamics.c, dtype=np.float64),
-        np.asarray(rollout.states, dtype=np.float64),
-        np.asarray(rollout.dt_history, dtype=np.float64),
-        np.asarray(adjoints, dtype=np.float64),
-        p0_values,
-        pq_values,
-        pm_values,
-    )
+    b_matrix = _dynamics_b_matrix_for_numba(dynamics)
+    cache = rollout.solver_cache
+    if isinstance(cache, LaggedMidpointForwardCache):
+        a_grad, h_grad, b_grad, c_grad = (
+            accumulate_lagged_midpoint_parameter_gradients_cached_presampled_kernel(
+                np.asarray(dynamics.h_matrix, dtype=np.float64),
+                b_matrix,
+                np.asarray(rollout.states, dtype=np.float64),
+                np.asarray(rollout.dt_history, dtype=np.float64),
+                np.asarray(adjoints, dtype=np.float64),
+                cache.predictors,
+                cache.stage2,
+                cache.stage3,
+                cache.stage4,
+                cache.linear_operators,
+                cache.system_matrices,
+                cache.jacobian1,
+                cache.jacobian2,
+                cache.jacobian3,
+                cache.jacobian4,
+                cache.feature1,
+                cache.feature2,
+                cache.feature3,
+                cache.feature4,
+                p0_values,
+                pq_values,
+                pm_values,
+            )
+        )
+    else:
+        a_grad, h_grad, b_grad, c_grad = accumulate_lagged_midpoint_parameter_gradients_presampled_kernel(
+            np.asarray(dynamics.a, dtype=np.float64),
+            np.asarray(dynamics.h_matrix, dtype=np.float64),
+            b_matrix,
+            np.asarray(dynamics.c, dtype=np.float64),
+            np.asarray(rollout.states, dtype=np.float64),
+            np.asarray(rollout.dt_history, dtype=np.float64),
+            np.asarray(adjoints, dtype=np.float64),
+            p0_values,
+            pq_values,
+            pm_values,
+        )
     return a_grad, h_grad, None if dynamics.b is None else b_grad, c_grad
 
 

@@ -828,6 +828,7 @@ class ObservationAlignedBestResponseEvaluator:
         total_decoder_action = np.zeros_like(decoder_direction_matrix, dtype=np.float64)
         total_dynamics_gradients = _zero_dynamics_gradients(dynamics)
         local_rollouts = self.get_forward_rollouts(dynamics).local_rollouts
+        decoder_matrix = decoder_parameter_matrix(decoder)
         for rollout_entry in local_rollouts:
             tangent_states = rollout_dynamics_parameter_tangent_from_base_rollout(
                 dynamics=dynamics,
@@ -837,16 +838,29 @@ class ObservationAlignedBestResponseEvaluator:
                 time_integrator=self.time_integrator,
             )
             observed_tangents = tangent_states[rollout_entry.observation_indices]
+            observed_states = rollout_entry.observed_states
+            feature_matrix = _decoder_feature_matrix(observed_states, decoder.form)
+            feature_tangent_matrix = _decoder_feature_directional_derivative_matrix(
+                observed_states, observed_tangents, decoder.form
+            )
+            observation_weights = np.asarray(
+                rollout_entry.observation_weights, dtype=np.float64
+            )
+            delta_residuals = (
+                feature_tangent_matrix @ decoder_matrix
+                + feature_matrix @ decoder_direction_matrix
+            )
+            weighted_delta_residuals = (
+                observation_weights[:, None] * delta_residuals
+            )
+            total_decoder_action += feature_matrix.T @ weighted_delta_residuals
             state_loss_gradients = np.zeros_like(rollout_entry.rollout.states, dtype=np.float64)
-            for local_idx, global_idx in enumerate(rollout_entry.observation_indices):
-                state = rollout_entry.rollout.states[global_idx]
-                state_tangent = observed_tangents[local_idx]
-                weight = float(rollout_entry.observation_weights[local_idx])
-                phi = decoder_feature_vector(state, decoder.form)
-                delta_residual = decoder.jacobian(state) @ state_tangent + decoder_direction.decode(state)
-                weighted_delta_residual = weight * delta_residual
-                total_decoder_action += np.outer(phi, weighted_delta_residual)
-                state_loss_gradients[global_idx] = decoder.jacobian(state).T @ weighted_delta_residual
+            feature_cotangents = weighted_delta_residuals @ decoder_matrix.T
+            state_loss_gradients[rollout_entry.observation_indices] = (
+                _decoder_feature_cotangent_state_pullback(
+                    observed_states, feature_cotangents, decoder.form
+                )
+            )
 
             sample_gradients = _dynamics_gradients_from_state_loss_gradients(
                 dynamics=dynamics,
@@ -1219,6 +1233,8 @@ class ObservationAlignedBestResponseEvaluator:
         local_rollouts = best_response.forward_cache.local_rollouts
         decoder_matrix = decoder_parameter_matrix(best_response.decoder)
         tangent_rollouts: list[np.ndarray] = []
+        feature_matrices: list[np.ndarray] = []
+        feature_tangent_matrices: list[np.ndarray] = []
         for rollout_entry in local_rollouts:
             tangent_states = rollout_dynamics_parameter_tangent_from_base_rollout(
                 dynamics=prepared_state.dynamics,
@@ -1229,23 +1245,26 @@ class ObservationAlignedBestResponseEvaluator:
             )
             tangent_rollouts.append(tangent_states)
             observed_tangents = tangent_states[rollout_entry.observation_indices]
-            for state, state_tangent, q_target, weight in zip(
+            feature_matrix = _decoder_feature_matrix(
+                rollout_entry.observed_states, best_response.decoder.form
+            )
+            feature_tangent_matrix = _decoder_feature_directional_derivative_matrix(
                 rollout_entry.observed_states,
                 observed_tangents,
-                rollout_entry.sample.qoi_observations,
-                rollout_entry.observation_weights,
-                strict=True,
-            ):
-                phi = decoder_feature_vector(state, best_response.decoder.form)
-                dphi = decoder_feature_directional_derivative(state, state_tangent)
-                if best_response.decoder.form == "V1v":
-                    dphi = np.concatenate([state_tangent, np.zeros(1, dtype=np.float64)])
-                q_pred = decoder_matrix.T @ phi
-                local_exact_mixed_action += float(weight) * (
-                    np.outer(dphi, q_pred)
-                    + np.outer(phi, decoder_matrix.T @ dphi)
-                    - np.outer(dphi, q_target)
-                )
+                best_response.decoder.form,
+            )
+            feature_matrices.append(feature_matrix)
+            feature_tangent_matrices.append(feature_tangent_matrix)
+            weights = np.asarray(rollout_entry.observation_weights, dtype=np.float64)
+            residuals = (
+                feature_matrix @ decoder_matrix
+                - rollout_entry.sample.qoi_observations
+            )
+            fixed_decoder_tangents = feature_tangent_matrix @ decoder_matrix
+            local_exact_mixed_action += (
+                feature_tangent_matrix.T @ (weights[:, None] * residuals)
+                + feature_matrix.T @ (weights[:, None] * fixed_decoder_tangents)
+            )
 
         self.increment_solve_count("tangent_forward", len(local_rollouts))
         exact_mixed_action = self.context.allreduce_array_sum(local_exact_mixed_action)
@@ -1264,19 +1283,21 @@ class ObservationAlignedBestResponseEvaluator:
 
         total_decoder_pullback = np.zeros_like(decoder_action_matrix, dtype=np.float64)
         residual_tangent_norm_sq = 0.0
-        for rollout_entry, tangent_states in zip(local_rollouts, tangent_rollouts, strict=True):
-            observed_tangents = tangent_states[rollout_entry.observation_indices]
-            for local_idx, global_idx in enumerate(rollout_entry.observation_indices):
-                state = rollout_entry.rollout.states[global_idx]
-                state_tangent = observed_tangents[local_idx]
-                weight = float(rollout_entry.observation_weights[local_idx])
-                residual_tangent = best_response.decoder.jacobian(state) @ state_tangent + decoder_direction.decode(state)
-                weighted_residual_tangent = weight * residual_tangent
-                residual_tangent_norm_sq += weight * float(np.dot(residual_tangent, residual_tangent))
-                total_decoder_pullback += np.outer(
-                    decoder_feature_vector(state, best_response.decoder.form),
-                    weighted_residual_tangent,
-                )
+        residual_tangent_rollouts: list[np.ndarray] = []
+        for rollout_entry, feature_matrix, feature_tangent_matrix in zip(
+            local_rollouts, feature_matrices, feature_tangent_matrices, strict=True
+        ):
+            weights = np.asarray(rollout_entry.observation_weights, dtype=np.float64)
+            residual_tangents = (
+                feature_tangent_matrix @ decoder_matrix
+                + feature_matrix @ decoder_action_matrix
+            )
+            residual_tangent_rollouts.append(residual_tangents)
+            weighted_residual_tangents = weights[:, None] * residual_tangents
+            residual_tangent_norm_sq += float(
+                np.sum(residual_tangents * weighted_residual_tangents)
+            )
+            total_decoder_pullback += feature_matrix.T @ weighted_residual_tangents
 
         decoder_pullback = self.context.allreduce_array_sum(total_decoder_pullback)
         decoder_reg_action_matrix = decoder_regularization_hessian_action_matrix(
@@ -1297,31 +1318,33 @@ class ObservationAlignedBestResponseEvaluator:
             best_response.decoder.output_dimension,
             decoder_adjoint_response_matrix,
         )
+        decoder_adjoint_response_matrix = decoder_parameter_matrix(
+            decoder_adjoint_response
+        )
 
         total_dynamics_gradients = _zero_dynamics_gradients(prepared_state.dynamics)
-        for rollout_entry, tangent_states in zip(local_rollouts, tangent_rollouts, strict=True):
-            observed_tangents = tangent_states[rollout_entry.observation_indices]
+        for rollout_entry, feature_matrix, residual_tangents in zip(
+            local_rollouts, feature_matrices, residual_tangent_rollouts, strict=True
+        ):
+            weights = np.asarray(rollout_entry.observation_weights, dtype=np.float64)
+            residuals = (
+                feature_matrix @ decoder_matrix
+                - rollout_entry.sample.qoi_observations
+            )
+            adjoint_delta_residuals = feature_matrix @ decoder_adjoint_response_matrix
+            feature_cotangents = (
+                (weights[:, None] * residual_tangents) @ decoder_matrix.T
+                - (weights[:, None] * residuals) @ decoder_adjoint_response_matrix.T
+                - (weights[:, None] * adjoint_delta_residuals) @ decoder_matrix.T
+            )
             state_loss_gradients = np.zeros_like(rollout_entry.rollout.states, dtype=np.float64)
-            for local_idx, global_idx in enumerate(rollout_entry.observation_indices):
-                state = rollout_entry.rollout.states[global_idx]
-                state_tangent = observed_tangents[local_idx]
-                weight = float(rollout_entry.observation_weights[local_idx])
-                residual = best_response.decoder.decode(state) - rollout_entry.sample.qoi_observations[local_idx]
-                residual_tangent = best_response.decoder.jacobian(state) @ state_tangent + decoder_direction.decode(state)
-                weighted_residual_tangent = weight * residual_tangent
-                direct_source = best_response.decoder.jacobian(state).T @ weighted_residual_tangent
-                adjoint_delta_jacobian = _decoder_jacobian_direction(
-                    decoder=best_response.decoder,
-                    decoder_direction=decoder_adjoint_response,
-                    state=state,
-                    state_tangent=np.zeros_like(state),
+            state_loss_gradients[rollout_entry.observation_indices] = (
+                _decoder_feature_cotangent_state_pullback(
+                    rollout_entry.observed_states,
+                    feature_cotangents,
+                    best_response.decoder.form,
                 )
-                adjoint_delta_residual = decoder_adjoint_response.decode(state)
-                mixed_source = weight * (
-                    adjoint_delta_jacobian.T @ residual
-                    + best_response.decoder.jacobian(state).T @ adjoint_delta_residual
-                )
-                state_loss_gradients[global_idx] = direct_source - mixed_source
+            )
 
             sample_gradients = _dynamics_gradients_from_state_loss_gradients(
                 dynamics=prepared_state.dynamics,
@@ -1392,6 +1415,9 @@ class ObservationAlignedBestResponseEvaluator:
         local_mixed_action = np.zeros((feature_dim, best_response.decoder.output_dimension), dtype=np.float64)
         local_rollouts = best_response.forward_cache.local_rollouts
         tangent_rollouts: list[np.ndarray] = []
+        feature_matrices: list[np.ndarray] = []
+        feature_tangent_matrices: list[np.ndarray] = []
+        decoder_matrix = decoder_parameter_matrix(best_response.decoder)
         for rollout_entry in local_rollouts:
             tangent_states = rollout_dynamics_parameter_tangent_from_base_rollout(
                 dynamics=prepared_state.dynamics,
@@ -1402,14 +1428,21 @@ class ObservationAlignedBestResponseEvaluator:
             )
             tangent_rollouts.append(tangent_states)
             observed_tangents = tangent_states[rollout_entry.observation_indices]
-            for state, state_tangent, weight in zip(
+            feature_matrix = _decoder_feature_matrix(
+                rollout_entry.observed_states, best_response.decoder.form
+            )
+            feature_tangent_matrix = _decoder_feature_directional_derivative_matrix(
                 rollout_entry.observed_states,
                 observed_tangents,
-                rollout_entry.observation_weights,
-            ):
-                phi = decoder_feature_vector(state, best_response.decoder.form)
-                theta_residual_tangent = best_response.decoder.jacobian(state) @ state_tangent
-                local_mixed_action += float(weight) * np.outer(phi, theta_residual_tangent)
+                best_response.decoder.form,
+            )
+            feature_matrices.append(feature_matrix)
+            feature_tangent_matrices.append(feature_tangent_matrix)
+            weights = np.asarray(rollout_entry.observation_weights, dtype=np.float64)
+            theta_residual_tangents = feature_tangent_matrix @ decoder_matrix
+            local_mixed_action += feature_matrix.T @ (
+                weights[:, None] * theta_residual_tangents
+            )
 
         self.increment_solve_count("tangent_forward", len(local_rollouts))
         mixed_action = self.context.allreduce_array_sum(local_mixed_action)
@@ -1428,16 +1461,27 @@ class ObservationAlignedBestResponseEvaluator:
 
         total_dynamics_gradients = _zero_dynamics_gradients(prepared_state.dynamics)
         projected_residual_tangent_norm_sq = 0.0
-        for rollout_entry, tangent_states in zip(local_rollouts, tangent_rollouts, strict=True):
-            observed_tangents = tangent_states[rollout_entry.observation_indices]
+        for rollout_entry, feature_matrix, feature_tangent_matrix in zip(
+            local_rollouts, feature_matrices, feature_tangent_matrices, strict=True
+        ):
+            weights = np.asarray(rollout_entry.observation_weights, dtype=np.float64)
+            projected_tangents = (
+                feature_tangent_matrix @ decoder_matrix
+                + feature_matrix @ decoder_action_matrix
+            )
+            weighted_projected_tangents = weights[:, None] * projected_tangents
+            projected_residual_tangent_norm_sq += float(
+                np.sum(projected_tangents * weighted_projected_tangents)
+            )
+            feature_cotangents = weighted_projected_tangents @ decoder_matrix.T
             state_loss_gradients = np.zeros_like(rollout_entry.rollout.states, dtype=np.float64)
-            for local_idx, global_idx in enumerate(rollout_entry.observation_indices):
-                state = rollout_entry.rollout.states[global_idx]
-                state_tangent = observed_tangents[local_idx]
-                weight = float(rollout_entry.observation_weights[local_idx])
-                projected_tangent = best_response.decoder.jacobian(state) @ state_tangent + decoder_direction.decode(state)
-                projected_residual_tangent_norm_sq += weight * float(np.dot(projected_tangent, projected_tangent))
-                state_loss_gradients[global_idx] = best_response.decoder.jacobian(state).T @ (weight * projected_tangent)
+            state_loss_gradients[rollout_entry.observation_indices] = (
+                _decoder_feature_cotangent_state_pullback(
+                    rollout_entry.observed_states,
+                    feature_cotangents,
+                    best_response.decoder.form,
+                )
+            )
 
             sample_gradients = _dynamics_gradients_from_state_loss_gradients(
                 dynamics=prepared_state.dynamics,
@@ -2472,6 +2516,64 @@ def decoder_feature_directional_derivative(state: np.ndarray, state_tangent: np.
     out[state.shape[0] : state.shape[0] + quad_state.shape[0]] = quad_tangent
     out[-1] = 0.0
     return out
+
+
+def _decoder_feature_matrix(states: np.ndarray, form: str) -> np.ndarray:
+    """Build decoder features for a batch of latent states."""
+    states_array = np.asarray(states, dtype=np.float64)
+    if states_array.ndim != 2:
+        raise ValueError(f"states must have shape (N, r), got {states_array.shape}")
+    ones = np.ones((states_array.shape[0], 1), dtype=np.float64)
+    if form == "V1v":
+        return np.concatenate([states_array, ones], axis=1)
+    rows, cols = np.tril_indices(states_array.shape[1])
+    quadratic = states_array[:, rows] * states_array[:, cols]
+    return np.concatenate([states_array, quadratic, ones], axis=1)
+
+
+def _decoder_feature_directional_derivative_matrix(
+    states: np.ndarray,
+    state_tangents: np.ndarray,
+    form: str,
+) -> np.ndarray:
+    """Apply the batched decoder feature Jacobian to state tangents."""
+    states_array = np.asarray(states, dtype=np.float64)
+    tangents_array = np.asarray(state_tangents, dtype=np.float64)
+    if tangents_array.shape != states_array.shape:
+        raise ValueError(
+            f"state_tangents must have shape {states_array.shape}, got {tangents_array.shape}"
+        )
+    zeros = np.zeros((states_array.shape[0], 1), dtype=np.float64)
+    if form == "V1v":
+        return np.concatenate([tangents_array, zeros], axis=1)
+    rows, cols = np.tril_indices(states_array.shape[1])
+    quadratic_tangents = (
+        tangents_array[:, rows] * states_array[:, cols]
+        + states_array[:, rows] * tangents_array[:, cols]
+    )
+    return np.concatenate([tangents_array, quadratic_tangents, zeros], axis=1)
+
+
+def _decoder_feature_cotangent_state_pullback(
+    states: np.ndarray,
+    feature_cotangents: np.ndarray,
+    form: str,
+) -> np.ndarray:
+    """Apply the batched transpose decoder feature Jacobian."""
+    states_array = np.asarray(states, dtype=np.float64)
+    cotangents = np.asarray(feature_cotangents, dtype=np.float64)
+    state_cotangents = cotangents[:, : states_array.shape[1]].copy()
+    if form == "V1v":
+        return state_cotangents
+    rows, cols = np.tril_indices(states_array.shape[1])
+    quadratic_cotangents = cotangents[
+        :, states_array.shape[1] : states_array.shape[1] + rows.shape[0]
+    ]
+    for feature_idx, (row, col) in enumerate(zip(rows, cols, strict=True)):
+        coefficient = quadratic_cotangents[:, feature_idx]
+        state_cotangents[:, row] += coefficient * states_array[:, col]
+        state_cotangents[:, col] += coefficient * states_array[:, row]
+    return state_cotangents
 
 
 def _dynamics_direction_explicit_matrices(
