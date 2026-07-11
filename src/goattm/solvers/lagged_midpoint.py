@@ -14,6 +14,7 @@ from goattm.solvers.lagged_midpoint_numba import (
     accumulate_lagged_midpoint_parameter_gradients_presampled_kernel,
     accumulate_lagged_midpoint_parameter_gradients_cached_presampled_kernel,
     compute_lagged_midpoint_discrete_adjoint_cached_presampled_kernel,
+    compute_lagged_midpoint_adjoint_and_parameter_gradients_cached_presampled_kernel,
     compute_lagged_midpoint_incremental_discrete_adjoint_cached_presampled_kernel,
     compute_lagged_midpoint_discrete_adjoint_presampled_kernel,
     lagged_midpoint_final_time_grid,
@@ -605,6 +606,77 @@ def accumulate_lagged_midpoint_parameter_gradients(
         if b_grad is not None and db is not None:
             b_grad += db
     return a_grad, h_grad, b_grad, c_grad
+
+
+@timed("goattm.solvers.compute_lagged_midpoint_adjoint_and_parameter_gradients")
+def compute_lagged_midpoint_adjoint_and_parameter_gradients(
+    dynamics: QuadraticDynamics,
+    rollout: RolloutResult,
+    state_loss_gradients: np.ndarray,
+    input_function: Callable[[float], np.ndarray] | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, np.ndarray]:
+    """Fuse the lagged-midpoint adjoint and parameter-gradient reverse passes."""
+    if not rollout.success:
+        raise RuntimeError("Cannot run a reverse pass from an unsuccessful rollout.")
+    if state_loss_gradients.shape != rollout.states.shape:
+        raise ValueError(
+            f"state_loss_gradients must have shape {rollout.states.shape}, "
+            f"got {state_loss_gradients.shape}"
+        )
+    cache = rollout.solver_cache
+    presampled = presample_lagged_midpoint_inputs(
+        input_function=input_function,
+        times=rollout.times,
+        dt_history=rollout.dt_history,
+        input_dimension=dynamics.input_dimension,
+    )
+    if isinstance(cache, LaggedMidpointForwardCache) and presampled is not None:
+        p0_values, pq_values, pm_values = presampled
+        b_matrix = _dynamics_b_matrix_for_numba(dynamics)
+        adjoints, a_grad, h_grad, b_grad, c_grad = (
+            compute_lagged_midpoint_adjoint_and_parameter_gradients_cached_presampled_kernel(
+                np.asarray(dynamics.h_matrix, dtype=np.float64),
+                b_matrix,
+                np.asarray(rollout.states, dtype=np.float64),
+                np.asarray(rollout.dt_history, dtype=np.float64),
+                np.asarray(state_loss_gradients, dtype=np.float64),
+                cache.predictors,
+                cache.stage2,
+                cache.stage3,
+                cache.stage4,
+                cache.linear_operators,
+                cache.system_matrices,
+                cache.jacobian1,
+                cache.jacobian2,
+                cache.jacobian3,
+                cache.jacobian4,
+                cache.feature1,
+                cache.feature2,
+                cache.feature3,
+                cache.feature4,
+                p0_values,
+                pq_values,
+                pm_values,
+            )
+        )
+        return adjoints, a_grad, h_grad, None if dynamics.b is None else b_grad, c_grad
+
+    adjoints = compute_lagged_midpoint_discrete_adjoint(
+        dynamics=dynamics,
+        states=rollout.states,
+        times=rollout.times,
+        dt_history=rollout.dt_history,
+        state_loss_gradients=state_loss_gradients,
+        input_function=input_function,
+        forward_cache=cache if isinstance(cache, LaggedMidpointForwardCache) else None,
+    )
+    a_grad, h_grad, b_grad, c_grad = accumulate_lagged_midpoint_parameter_gradients(
+        dynamics=dynamics,
+        rollout=rollout,
+        adjoints=adjoints,
+        input_function=input_function,
+    )
+    return adjoints, a_grad, h_grad, b_grad, c_grad
 
 
 def _dynamics_b_matrix_for_numba(dynamics: QuadraticDynamics) -> np.ndarray:

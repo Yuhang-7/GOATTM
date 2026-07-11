@@ -63,6 +63,9 @@ from goattm.solvers import (
     rollout_to_observation_times,
     validate_time_integrator,
 )
+from goattm.solvers.lagged_midpoint import (
+    compute_lagged_midpoint_adjoint_and_parameter_gradients,
+)
 
 
 DynamicsLike = LinearDynamics | GeneralQuadraticDynamics | QuadraticDynamics | SkewCPQuadraticDynamics | StabilizedQuadraticDynamics
@@ -2887,20 +2890,13 @@ def _dynamics_gradients_from_state_loss_gradients(
             input_function=input_function,
         )
     elif integrator == "lagged_midpoint":
-        adjoints = compute_lagged_midpoint_discrete_adjoint(
-            dynamics=dynamics,
-            states=rollout.states,
-            times=rollout.times,
-            dt_history=rollout.dt_history,
-            state_loss_gradients=state_loss_gradients,
-            input_function=input_function,
-            forward_cache=getattr(rollout, "solver_cache", None),
-        )
-        a_grad, h_grad, b_grad, c_grad = accumulate_lagged_midpoint_parameter_gradients(
-            dynamics=dynamics,
-            rollout=rollout,
-            adjoints=adjoints,
-            input_function=input_function,
+        adjoints, a_grad, h_grad, b_grad, c_grad = (
+            compute_lagged_midpoint_adjoint_and_parameter_gradients(
+                dynamics=dynamics,
+                rollout=rollout,
+                state_loss_gradients=state_loss_gradients,
+                input_function=input_function,
+            )
         )
     else:
         adjoints = compute_skew_lagged_midpoint_discrete_adjoint(
