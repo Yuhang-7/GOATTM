@@ -231,3 +231,45 @@ Practical policy from these measurements:
   below 40 GB.
 - For larger sketch ranks such as `k=64`, prefer smaller chunks unless the auto policy confirms that
   the cache fits.
+
+## Higher Sketch Ranks And Masked-Cross Feature Chunking
+
+Testing higher probing ranks showed that the remaining memory wall for `k=64` is not the
+`d_pred_fixed` cache. The dominant temporary is the masked-cross quadratic block
+
+```text
+du_i * u_j + u_i * du_j
+```
+
+with shape approximately `decoder_chunk_size x k x feature_chunk`. The direct decoder GN cotangent
+path now exposes and auto-selects this feature chunk through:
+
+- `GOATTM_MASKED_CROSS_FEATURE_CHUNK=<integer>` for an explicit override
+- `GOATTM_MASKED_CROSS_TEMP_BUDGET_MIB=<MiB>` for the auto policy
+
+The default temporary budget is now `2048` MiB. This keeps the common `k=16/32` cases on the old
+large feature chunk, while allowing `k=64` to choose a smaller chunk automatically rather than OOMing.
+For conservative debugging on crowded GPUs, set `GOATTM_MASKED_CROSS_TEMP_BUDGET_MIB=512`.
+
+Single-GPU timings on `nid001180`, latent rank 120, 1024 local samples, `sample_chunk_size=1024`,
+and `decoder_chunk_size=4096`:
+
+| Case | Feature chunk policy | HGNVP action | Decoder GN cotangent | Peak memory |
+| --- | --- | ---: | ---: | ---: |
+| `k=32` | auto, 2048 MiB budget | 18.56 s | 6.01 s | 28.1 GiB |
+| `k=48` | previous default path | 29.91 s | 12.79 s | 30.8 GiB |
+| `k=64` | hard-coded 512 | OOM | OOM | >39 GiB |
+| `k=64` | explicit 128 | 40.70 s | 19.15 s | 36.9 GiB |
+| `k=64` | auto, 2048 MiB budget | 39.19 s | 17.62 s | 37.9 GiB |
+
+Interpretation:
+
+- `k=64` is feasible on a 40 GB A100 for 1024 local samples, but it is close to the memory edge.
+- For optimization iterations, `k=16/32` remains the better default tradeoff.
+- `k=64` is useful for spectral diagnostics or for testing whether the estimated Jacobian/HGNVP
+  subspace is saturated.
+- The decoder cotangent path is batched over directions; it is not looping over directions in Python.
+  Its arithmetic still has a real `k` factor because exact application requires evaluating
+  `D Phi(u)[du_1, ..., du_k]` and the corresponding cotangent action for all tangent right-hand
+  sides. Further speedups will require a fused CUDA/Triton masked-cross kernel or an additional
+  low-rank approximation inside this decoder Schur action.

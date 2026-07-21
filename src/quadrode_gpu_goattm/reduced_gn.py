@@ -31,6 +31,34 @@ def _sync_if_cuda(tensor: torch.Tensor) -> None:
         torch.cuda.synchronize(tensor.device)
 
 
+def _masked_cross_feature_chunk_size(
+    feature_count: int,
+    row_count: int,
+    direction_count: int,
+    *,
+    element_size: int,
+    device: torch.device,
+) -> int:
+    """Choose the masked-cross feature chunk without creating GiB-scale temporaries."""
+    feature_count = max(1, int(feature_count))
+    requested = os.environ.get("GOATTM_MASKED_CROSS_FEATURE_CHUNK", "auto").strip().lower()
+    if requested not in {"", "auto"}:
+        return min(max(1, int(requested)), feature_count)
+
+    preferred = min(512, feature_count)
+    row_count = max(1, int(row_count))
+    direction_count = max(1, int(direction_count))
+    element_size = max(1, int(element_size))
+    # The direct path materializes several m x k x feature_chunk tensors at once
+    # through index_select/products/adds. Capping this estimate keeps high-k
+    # probing from failing only because one masked-cross block is too large.
+    budget_mib = float(os.environ.get("GOATTM_MASKED_CROSS_TEMP_BUDGET_MIB", "2048"))
+    budget_bytes = max(64.0, budget_mib) * 1024.0 * 1024.0
+    bytes_per_feature = 4.0 * float(row_count) * float(direction_count) * float(element_size)
+    auto_chunk = int(budget_bytes // max(1.0, bytes_per_feature))
+    return min(preferred, max(1, auto_chunk))
+
+
 def _solve_decoder_normal(
     normal_matrix: torch.Tensor,
     rhs: torch.Tensor,
@@ -1065,7 +1093,13 @@ def _gauss_newton_state_cotangents_batched_masked_cross_direct(
     coeff_no_bias = coeff[:, : decoder.feature_dim]
     rhs_for_dcoeff_t = states.new_zeros(k, feature_dim, output_dim)
     row_chunk = max(1, int(chunk_size))
-    feature_chunk = min(512, max(1, int(decoder.feature_dim)))
+    feature_chunk = _masked_cross_feature_chunk_size(
+        int(decoder.feature_dim),
+        min(row_chunk, leading),
+        k,
+        element_size=states.element_size(),
+        device=states.device,
+    )
     cache_mode = os.environ.get("GOATTM_CACHE_D_PRED_FIXED", "auto").strip().lower()
     if cache_mode in {"1", "true", "yes", "on"}:
         cache_d_pred_fixed = True
@@ -1484,8 +1518,13 @@ def _masked_cross_prediction_tangent_batched(
     idx_i = decoder.quadratic_i.to(device=states.device)
     idx_j = decoder.quadratic_j.to(device=states.device)
     quad_coeff = coeff_no_bias[:, decoder.latent_dim :]
-    feature_chunk = int(os.environ.get("GOATTM_MASKED_CROSS_FEATURE_CHUNK", "512"))
-    feature_chunk = min(max(1, feature_chunk), max(1, int(idx_i.numel())))
+    feature_chunk = _masked_cross_feature_chunk_size(
+        int(idx_i.numel()),
+        m,
+        k,
+        element_size=states.element_size(),
+        device=states.device,
+    )
     for start in range(0, idx_i.numel(), feature_chunk):
         end = min(start + feature_chunk, idx_i.numel())
         idx_i_chunk = idx_i[start:end]
