@@ -1,0 +1,158 @@
+# HGNVP GPU Optimization Log - 2026-07-21
+
+## Scope
+
+This log records the recent GPU optimization work for reduced Gauss-Newton / HGNVP actions in
+`quad_goattm`, focused on the SWE reduced-order VarPro workflow with latent rank 120 and
+EnergyTuckerTT quadratic dynamics.
+
+Primary files touched:
+
+- `quadrode_gpu_goattm/reduced_gn.py`
+- `quadrode_gpu_goattm/adjoint.py`
+
+## Baseline and Current Runtime
+
+The timings below are single-GPU timings on Perlmutter A100 nodes, using the packed Cascadia
+training data and batched HGNVP directions. Here `k` is the number of probing/sketch directions,
+not the latent dimension.
+
+| Case | Earlier optimized path | Current path | Speedup |
+| --- | ---: | ---: | ---: |
+| 1024 samples, k=16 | ~20.3 s | ~16.6 s | ~1.22x |
+| 2048 samples, k=16 | ~40.8 s | ~33.3 s | ~1.22x |
+
+Relative to the older adjoint path, the current implementation is close to 2x faster:
+
+| Case | Old path | Current path | Speedup |
+| --- | ---: | ---: | ---: |
+| 1024 samples, k=16 | ~32.8-36.3 s | ~16.6 s | ~2.0x |
+| 2048 samples, k=16 | ~65.6-72.8 s | ~33.3 s | ~2.0x |
+
+Representative current breakdown for `1024 samples, k=16`:
+
+- incremental tangent propagation: ~4.7 s
+- decoder GN cotangent: ~7.1 s
+- batched adjoint: ~4.8 s
+- decoder normal Cholesky/factor: ~0.006 s
+
+## GEMM/BMM Rewrite
+
+The main source-level cleanup was to remove `torch.einsum` from the two HGNVP implementation
+files and replace high-frequency contractions with explicit GEMM/BMM-style operations.
+
+Current status:
+
+- `reduced_gn.py`: 0 `einsum`
+- `adjoint.py`: 0 `einsum`
+
+Important rewrites:
+
+- EnergyTucker reduced matrix construction now uses flattened tensor contractions and matmul.
+- EnergyTucker parameter-core directional action now uses larger GEMMs instead of many small contractions.
+- Linear/source tangent and adjoint VJPs now use matmul/batched matmul.
+- Decoder dense/fallback Schur contractions now use matmul helpers.
+- EnergyTuckerTT core gradient flush was rewritten as GEMM sequences.
+
+The last EnergyTuckerTT reconstruction rewrite was numerically checked against the old einsum form:
+
+- `k=16`: old 0.353 ms, new 0.279 ms, ~1.27x
+- `k=32`: old 0.524 ms, new 0.539 ms, approximately neutral
+- relative error: ~3.5e-16
+
+That specific cache construction is not a major runtime contributor; the large speedups came from
+rewriting contractions inside sample/time-step loops and decoder masked-cross paths.
+
+## Decoder Masked-Cross Optimization
+
+The largest decoder improvement came from replacing an output-loop/scatter formulation with a
+direct quadratic-feature chunk GEMM:
+
+```text
+quad_dot = du_i * u_j + u_i * du_j
+d_pred += quad_dot @ coeff_quad.T
+```
+
+This avoids materializing a large `sample x output_chunk x quadratic_feature` gradient tensor and
+reduces scatter overhead.
+
+Observed effect for `1024 samples, k=16`:
+
+- decoder GN cotangent before this rewrite: ~10.1 s
+- decoder GN cotangent after this rewrite: ~7.1 s
+
+The remaining decoder bottleneck is still the masked-cross gather/scatter pattern:
+
+- `_masked_cross_prediction_tangent_batched`
+- `_masked_cross_output_cotangent_state_grad_batched`
+- `_add_masked_cross_tangent_residual_terms_`
+
+These are the best candidates for a fused CUDA/Triton kernel.
+
+## Decoder Normal Solve
+
+The decoder normal solve is already factorized and reused in HGNVP:
+
+- `_decoder_normal_cholesky(...)` computes/caches the Cholesky factor.
+- `_solve_decoder_normal(...)` uses `torch.cholesky_solve` when the factor is available.
+
+Measured sizes for `1024 samples, k=16`:
+
+- normal matrix: ~0.051 GB
+- normal Cholesky: ~0.051 GB
+- factor time: ~0.006 s
+
+Conclusion: decoder normal factorization/solve is not the current bottleneck.
+
+## Large Intermediate Tensors
+
+The main peak-memory contributors are trajectory-shaped batched tangent/cotangent buffers.
+
+Measured for `1024 samples, k=16, latent_dim=120`:
+
+- `states_dot`: ~7.92 GB
+- `state_cot`: ~7.92 GB
+- rollout states: ~0.50 GB
+- Picard iterates: ~1.48 GB
+
+The code contains an experimental buffer-reuse option:
+
+```bash
+GOATTM_REUSE_STATE_DOT_BUFFER=1
+```
+
+When enabled in `hessian_batch_flat`, the decoder cotangent routine may overwrite the `states_dot`
+buffer with `state_cot` after each block's tangent values are no longer needed. This should reduce
+peak memory by roughly one trajectory buffer, about 7.9 GB for the `1024,k=16` case.
+
+This option is off by default until it is validated on a clean GPU node.
+
+## Candidate Fused Kernel
+
+The next meaningful optimization is likely not another plain GEMM rewrite, but a fused masked-cross
+decoder kernel that combines:
+
+1. gather of `u_i, u_j, du_i, du_j`
+2. computation of `du_i * u_j + u_i * du_j`
+3. multiplication/accumulation into output tangent or state cotangent
+
+The target is to reduce:
+
+- temporary `quad_dot` materialization
+- repeated `index_select`
+- repeated `scatter_add_`
+- many small kernel launches across feature chunks
+
+The expected benefit is mostly in `decoder_gn_cotangent`, currently around 7 s per
+`1024 samples, k=16`.
+
+## Validation Performed
+
+Representative checks:
+
+- HVP old/new relative error: typically `1e-17` to `1e-18`
+- local Gram relative error: typically `1e-17`
+- EnergyTuckerTT reconstruction rewrite relative error: ~`1e-16`
+- Dense fallback VJP rewrite relative error: ~`2e-16`
+
+The current stable path does not require `GOATTM_REUSE_STATE_DOT_BUFFER`.
