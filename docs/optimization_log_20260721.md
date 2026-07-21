@@ -156,3 +156,48 @@ Representative checks:
 - Dense fallback VJP rewrite relative error: ~`2e-16`
 
 The current stable path does not require `GOATTM_REUSE_STATE_DOT_BUFFER`.
+
+## Masked-Cross Shared Tangent/Residual Pass
+
+A follow-up optimization merged two masked-cross decoder passes in the direct HGNVP cotangent path.
+Previously, for each sample chunk the code computed the same quadratic tangent rows
+
+```text
+du_i * u_j + u_i * du_j
+```
+
+twice:
+
+1. once to form the fixed decoder prediction tangent `d_pred_fixed`, and
+2. once to accumulate the normal-equation right-hand side term `-dF.T @ weighted_residual`.
+
+The new helper `_masked_cross_prediction_and_residual_terms_batched(...)` computes each masked-cross
+feature chunk once, using it for both accumulations before moving to the next chunk. This does not
+change the algebra; it removes one large gather/multiply/matmul traversal in the first decoder GN
+cotangent stage.
+
+Validation after the change:
+
+- `python -m py_compile quadrode_gpu_goattm/reduced_gn.py`
+- `tools/test_varpro_schur_components.py`
+- `tools/test_gauss_newton_hvp.py`
+
+Single-GPU timings on `nid001180` with packed Cascadia accum-displacement data, latent rank 120,
+`k=16`, and `sample_chunk_size=1024`:
+
+| Case | Previous current path | After shared pass | Speedup |
+| --- | ---: | ---: | ---: |
+| 1024 samples, k=16 | ~16.6 s | 12.94 s | ~1.28x |
+| 2048 samples, k=16 | ~33.3 s | 25.37 s | ~1.31x |
+
+Breakdown after the shared pass:
+
+| Case | Incremental tangent | Decoder GN cotangent | Batched adjoint | Peak memory |
+| --- | ---: | ---: | ---: | ---: |
+| 1024 samples, k=16 | 3.89 s | 4.64 s | 4.36 s | 20.5 GiB |
+| 2048 samples, k=16 | 7.68 s | 9.24 s | 8.44 s | 32.5 GiB |
+
+The 2048 case now scales almost exactly as two 1024-sample chunks. The remaining dominant costs are
+roughly balanced between incremental tangent propagation, decoder cotangent application, and the
+batched adjoint. Decoder cotangent is still the best target for a future fused kernel because it
+continues to perform masked gathers and scatter-adds in the state-cotangent stage.

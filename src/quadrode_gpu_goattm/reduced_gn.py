@@ -1084,19 +1084,13 @@ def _gauss_newton_state_cotangents_batched_masked_cross_direct(
         else:
             weighted_residual = residual * flat_weights[start:end, None]
 
-        d_pred_fixed = _masked_cross_prediction_tangent_batched(
-            decoder,
-            u,
-            du,
-            coeff_no_bias,
-            output_chunk_size=16,
-        )
-        _add_masked_cross_tangent_residual_terms_(
+        d_pred_fixed = _masked_cross_prediction_and_residual_terms_batched(
             rhs_for_dcoeff_t,
             decoder,
             u,
             du,
             weighted_residual,
+            coeff_no_bias,
             feature_chunk_size=feature_chunk,
         )
         if flat_weights is None:
@@ -1512,6 +1506,54 @@ def _add_masked_cross_tangent_residual_terms_(
         rhs_for_dcoeff_t[:, feature_offset + start : feature_offset + end, :].add_(
             -torch.matmul(quad_dot.permute(1, 2, 0), weighted_residual)
         )
+
+
+def _masked_cross_prediction_and_residual_terms_batched(
+    rhs_for_dcoeff_t: torch.Tensor,
+    decoder,
+    states: torch.Tensor,
+    states_dot: torch.Tensor,
+    weighted_residual: torch.Tensor,
+    coeff_no_bias: torch.Tensor,
+    *,
+    feature_chunk_size: int = 512,
+) -> torch.Tensor:
+    """Compute fixed decoder tangents while accumulating ``-dF.T @ residual``."""
+    m, k, r = states_dot.shape
+    output_dim = int(coeff_no_bias.shape[0])
+    d_pred = states_dot.reshape(m * k, r).matmul(coeff_no_bias[:, : decoder.latent_dim].T).reshape(m, k, output_dim)
+    rhs_for_dcoeff_t[:, : decoder.latent_dim, :].add_(-torch.matmul(states_dot.permute(1, 2, 0), weighted_residual))
+    if not getattr(decoder, "include_quadratic", False):
+        return d_pred
+    if not hasattr(decoder, "quadratic_i"):
+        dfeat = decoder_feature_tangent_batched(decoder, states, states_dot, chunk_size=states.shape[0])
+        dfeat_quad = dfeat[:, :, decoder.latent_dim :]
+        d_pred.add_(
+            dfeat_quad.reshape(m * k, dfeat_quad.shape[-1]).matmul(coeff_no_bias[:, decoder.latent_dim :].T).reshape(m, k, output_dim)
+        )
+        rhs_for_dcoeff_t[:, decoder.latent_dim :, :].add_(
+            -torch.matmul(dfeat_quad.permute(1, 2, 0), weighted_residual)
+        )
+        return d_pred
+
+    idx_i_all = decoder.quadratic_i.to(device=states.device)
+    idx_j_all = decoder.quadratic_j.to(device=states.device)
+    quad_coeff = coeff_no_bias[:, decoder.latent_dim :]
+    feature_offset = int(decoder.latent_dim)
+    chunk = max(1, int(feature_chunk_size))
+    for start in range(0, idx_i_all.numel(), chunk):
+        end = min(start + chunk, idx_i_all.numel())
+        idx_i = idx_i_all[start:end]
+        idx_j = idx_j_all[start:end]
+        quad_dot = (
+            states_dot.index_select(2, idx_i) * states.index_select(1, idx_j)[:, None, :]
+            + states.index_select(1, idx_i)[:, None, :] * states_dot.index_select(2, idx_j)
+        )
+        d_pred.add_(quad_dot.reshape(m * k, end - start).matmul(quad_coeff[:, start:end].T).reshape(m, k, output_dim))
+        rhs_for_dcoeff_t[:, feature_offset + start : feature_offset + end, :].add_(
+            -torch.matmul(quad_dot.permute(1, 2, 0), weighted_residual)
+        )
+    return d_pred
 
 
 def _single_pass_schur_sketch_state_(
