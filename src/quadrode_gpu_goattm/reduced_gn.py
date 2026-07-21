@@ -1066,6 +1066,25 @@ def _gauss_newton_state_cotangents_batched_masked_cross_direct(
     rhs_for_dcoeff_t = states.new_zeros(k, feature_dim, output_dim)
     row_chunk = max(1, int(chunk_size))
     feature_chunk = min(512, max(1, int(decoder.feature_dim)))
+    cache_mode = os.environ.get("GOATTM_CACHE_D_PRED_FIXED", "auto").strip().lower()
+    if cache_mode in {"1", "true", "yes", "on"}:
+        cache_d_pred_fixed = True
+    elif cache_mode in {"0", "false", "no", "off"}:
+        cache_d_pred_fixed = False
+    elif cache_mode == "auto":
+        cache_bytes = int(leading) * int(k) * int(output_dim) * int(states.element_size())
+        if states.device.type == "cuda":
+            try:
+                with torch.cuda.device(states.device):
+                    free_bytes, _total_bytes = torch.cuda.mem_get_info()
+            except RuntimeError:
+                free_bytes = 0
+            cache_d_pred_fixed = cache_bytes <= 0.5 * int(free_bytes)
+        else:
+            cache_d_pred_fixed = False
+    else:
+        raise ValueError("GOATTM_CACHE_D_PRED_FIXED must be one of auto, 0/1, false/true, no/yes, off/on")
+    d_pred_fixed_chunks: list[torch.Tensor | None] | None = [] if cache_d_pred_fixed else None
 
     for start in range(0, leading, row_chunk):
         end = min(start + row_chunk, leading)
@@ -1099,6 +1118,8 @@ def _gauss_newton_state_cotangents_batched_masked_cross_direct(
             weighted_d_pred = d_pred_fixed * flat_weights[start:end, None, None]
         coeff_cross = torch.matmul(weighted_d_pred.permute(1, 2, 0), features_aug)
         rhs_for_dcoeff_t.add_(-coeff_cross.transpose(1, 2))
+        if d_pred_fixed_chunks is not None:
+            d_pred_fixed_chunks.append(d_pred_fixed)
 
     normal_matrix = normal.normal_matrix.to(device=states.device, dtype=states.dtype)
     solved = _solve_decoder_normal(
@@ -1110,6 +1131,7 @@ def _gauss_newton_state_cotangents_batched_masked_cross_direct(
 
     state_cot = flat_dot if bool(reuse_states_dot_buffer) else states.new_empty(leading, k, states.shape[-1])
     qform = states.new_zeros(k)
+    d_pred_chunk_index = 0
     for start in range(0, leading, row_chunk):
         end = min(start + row_chunk, leading)
         u = flat_states[start:end]
@@ -1120,13 +1142,20 @@ def _gauss_newton_state_cotangents_batched_masked_cross_direct(
             features_aug = torch.cat((features, ones), dim=1)
         else:
             features_aug = features
-        d_pred_fixed = _masked_cross_prediction_tangent_batched(
-            decoder,
-            u,
-            du,
-            coeff_no_bias,
-            output_chunk_size=16,
-        )
+        if d_pred_fixed_chunks is None:
+            d_pred_fixed = _masked_cross_prediction_tangent_batched(
+                decoder,
+                u,
+                du,
+                coeff_no_bias,
+                output_chunk_size=16,
+            )
+        else:
+            d_pred_fixed = d_pred_fixed_chunks[d_pred_chunk_index]
+            d_pred_fixed_chunks[d_pred_chunk_index] = None
+            d_pred_chunk_index += 1
+            if d_pred_fixed is None:
+                raise RuntimeError("cached d_pred_fixed chunk was unexpectedly released")
         dres = d_pred_fixed + (features_aug @ dcoeff.reshape(k * output_dim, feature_dim).T).reshape(end - start, k, output_dim)
         if flat_weights is None:
             weighted_output = dres
@@ -2261,7 +2290,7 @@ class ReducedGNWorkspace:
                 ridge=self.objective.decoder_ridge,
                 chunk_size=decoder_chunk,
                 normal_cholesky=normal_cholesky,
-                reuse_states_dot_buffer=os.environ.get("GOATTM_REUSE_STATE_DOT_BUFFER", "0") == "1",
+                reuse_states_dot_buffer=os.environ.get("GOATTM_REUSE_STATE_DOT_BUFFER", "1") != "0",
             )
             _sync_if_cuda(state_cot)
             timings["decoder_gn_cotangent"] += time.perf_counter() - t0

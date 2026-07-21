@@ -115,17 +115,10 @@ Measured for `1024 samples, k=16, latent_dim=120`:
 - rollout states: ~0.50 GB
 - Picard iterates: ~1.48 GB
 
-The code contains an experimental buffer-reuse option:
-
-```bash
-GOATTM_REUSE_STATE_DOT_BUFFER=1
-```
-
-When enabled in `hessian_batch_flat`, the decoder cotangent routine may overwrite the `states_dot`
-buffer with `state_cot` after each block's tangent values are no longer needed. This should reduce
-peak memory by roughly one trajectory buffer, about 7.9 GB for the `1024,k=16` case.
-
-This option is off by default until it is validated on a clean GPU node.
+The `hessian_batch_flat` path now enables trajectory-buffer reuse by default. The decoder cotangent
+routine overwrites the `states_dot` buffer with `state_cot` after each block's tangent values are no
+longer needed. This reduces peak memory by roughly one trajectory buffer. Set
+`GOATTM_REUSE_STATE_DOT_BUFFER=0` to disable this behavior for debugging.
 
 ## Candidate Fused Kernel
 
@@ -155,7 +148,7 @@ Representative checks:
 - EnergyTuckerTT reconstruction rewrite relative error: ~`1e-16`
 - Dense fallback VJP rewrite relative error: ~`2e-16`
 
-The current stable path does not require `GOATTM_REUSE_STATE_DOT_BUFFER`.
+The current stable path uses `GOATTM_REUSE_STATE_DOT_BUFFER=1` semantics by default and keeps `0` as a debug fallback.
 
 ## Masked-Cross Shared Tangent/Residual Pass
 
@@ -201,3 +194,40 @@ The 2048 case now scales almost exactly as two 1024-sample chunks. The remaining
 roughly balanced between incremental tangent propagation, decoder cotangent application, and the
 batched adjoint. Decoder cotangent is still the best target for a future fused kernel because it
 continues to perform masked gathers and scatter-adds in the state-cotangent stage.
+
+## Default Buffer Reuse And Auto `d_pred_fixed` Cache
+
+A second follow-up made two runtime policies explicit in `hessian_batch_flat`:
+
+1. `GOATTM_REUSE_STATE_DOT_BUFFER` now defaults to enabled. This is a pure memory optimization: after
+   decoder cotangents for a chunk are formed, `state_cot` may reuse the storage formerly occupied by
+   `states_dot`.
+2. `GOATTM_CACHE_D_PRED_FIXED` now defaults to `auto`. In the masked-cross direct path, the fixed
+   prediction tangent `d_pred_fixed` computed during the normal-equation RHS pass can be cached and
+   reused in the state-cotangent pass. The auto policy estimates the cache size and enables it only
+   when it is at most half of currently free CUDA memory. Set `GOATTM_CACHE_D_PRED_FIXED=0` to force
+   recomputation, or `1` to force caching.
+
+Validation:
+
+- buffer reuse same-model check: HVP relative error `3.2e-20`, qform relative error `0`
+- `d_pred_fixed` cache same-model check: HVP relative error `2.3e-21`, qform relative error `0`
+
+Additional timings on `nid001180`:
+
+| Case | Policy | HGNVP action | Decoder GN cotangent | Peak memory |
+| --- | --- | ---: | ---: | ---: |
+| 1024 samples, k=16 | reuse on, no `d_pred` cache | 12.65 s | 4.62 s | 12.6 GiB |
+| 1024 samples, k=16 | reuse on, `d_pred` cache on | 11.30 s | 3.25 s | 15.8 GiB |
+| 2048 samples, k=16, chunk=2048 | reuse on, no `d_pred` cache | 22.98 s | 9.23 s | 23.9 GiB |
+| 2048 samples, k=16, chunk=1024 | reuse on, `d_pred` cache on | 22.67 s | 6.49 s | 27.8 GiB |
+| 1024 samples, k=32 | reuse on, no `d_pred` cache | 21.19 s | 8.65 s | 21.7 GiB |
+| 1024 samples, k=32 | reuse on, auto `d_pred` cache | 18.51 s | 6.01 s | 28.1 GiB |
+
+Practical policy from these measurements:
+
+- For `k=16`, one GPU can process 2048 samples in one chunk comfortably.
+- For `k=32`, use 1024-sample chunks; auto `d_pred` caching gives a useful speedup while staying well
+  below 40 GB.
+- For larger sketch ranks such as `k=64`, prefer smaller chunks unless the auto policy confirms that
+  the cache fits.
