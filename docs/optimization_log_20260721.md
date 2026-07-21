@@ -273,3 +273,37 @@ Interpretation:
   `D Phi(u)[du_1, ..., du_k]` and the corresponding cotangent action for all tangent right-hand
   sides. Further speedups will require a fused CUDA/Triton masked-cross kernel or an additional
   low-rank approximation inside this decoder Schur action.
+
+## Additional Optimization Probes
+
+Two follow-up probes were tested after the high-rank feature-chunk change:
+
+1. Caching `features_aug` between the two decoder GN cotangent passes looked attractive because the
+   second pass recomputes `decoder.features(u)`. In practice it increased tensor lifetimes and caused
+   `k=32`, 1024-sample runs to OOM on a 40 GB A100. This should stay off the default path unless it is
+   redesigned as a fused pass rather than as a Python-side tensor cache.
+2. The existing `GOATTM_TRITON_PARAM_CORE=1` EnergyTucker parameter-core kernel was repaired enough
+   to compile experimentally, but a simple hand-accumulation version made incremental tangent much
+   slower: `incremental_tangent` increased from about `6.35 s` to about `50.7 s` for
+   `k=32`, 1024 samples. A useful Triton path needs to fuse a larger operation, not replace one GEMM
+   with scalar accumulation.
+
+The current promising low-risk memory optimization is in-place accumulation in the batched tangent
+path:
+
+- `_linear_tangent_batched` now accumulates parameter-action terms into the existing state-action
+  buffer instead of materializing a separate full `n x k x r` parameter-action result.
+- EnergyTucker frozen tangent and parameter-action paths now back-project one reduced tangent and add
+  the basis-parameter contribution in place, avoiding one extra full `n x k x r` result at the final
+  addition.
+
+Sanity timing with `k=32`, 1024 samples stayed essentially unchanged:
+
+| Case | HGNVP action | Incremental tangent | Decoder GN cotangent | Peak memory |
+| --- | ---: | ---: | ---: | ---: |
+| Before in-place tangent accumulation | 18.52 s | 6.35 s | 6.03 s | 28.1 GiB |
+| After in-place tangent accumulation | 18.67 s | 6.50 s | 6.02 s | 28.1 GiB |
+
+The main intended benefit is peak-memory reduction near the `k=32`, 2048-sample boundary. The first
+2048-sample attempt before the EnergyTucker in-place change OOMed inside EnergyTucker back-projection
+with only about `44 MiB` free. A follow-up GPU allocation is needed to retest this boundary.

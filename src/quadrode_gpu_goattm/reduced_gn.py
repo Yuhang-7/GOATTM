@@ -334,16 +334,26 @@ def _linear_param_action_batched(
     x: torch.Tensor,
     directions: list[Direction],
     stack_cache: dict[str, torch.Tensor] | None = None,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     linear = dynamics.linear
     if isinstance(linear, DenseLinearA):
         d_a = _direction_stack_cached(directions, "linear.A", linear.A, stack_cache)
         k, r, _ = d_a.shape
-        return x.matmul(d_a.reshape(k * r, r).T).reshape(x.shape[0], k, r)
+        term = x.matmul(d_a.reshape(k * r, r).T).reshape(x.shape[0], k, r)
+        if out is None:
+            return term
+        out.add_(term)
+        return out
     if isinstance(linear, DissipativeSkewA):
         raw_dot = _direction_stack_cached(directions, "linear.raw_damping", linear.raw_damping, stack_cache)
         damping = linear.raw_damping.to(device=x.device, dtype=x.dtype)
-        out = (-2.0 * damping[None, :] * raw_dot.to(device=x.device, dtype=x.dtype))[None, :, :] * x[:, None, :]
+        diagonal_term = (-2.0 * damping[None, :] * raw_dot.to(device=x.device, dtype=x.dtype))[None, :, :] * x[:, None, :]
+        if out is None:
+            out = diagonal_term
+        else:
+            out.add_(diagonal_term)
+            del diagonal_term
         if linear.skew_rank > 0:
             p = linear.P.to(device=x.device, dtype=x.dtype)
             q = linear.Q.to(device=x.device, dtype=x.dtype)
@@ -351,16 +361,16 @@ def _linear_param_action_batched(
             dq = _direction_stack_cached(directions, "linear.Q", linear.Q, stack_cache).to(device=x.device, dtype=x.dtype)
             k, r, s = dp.shape
             x_dq = torch.matmul(x.unsqueeze(0), dq).permute(1, 0, 2)
-            x_dp = torch.matmul(x.unsqueeze(0), dp).permute(1, 0, 2)
+            out.add_(x_dq.matmul(p.T))
+            del x_dq
             xq = x @ q
+            out.add_(xq.matmul(dp.reshape(k * r, s).T).reshape(x.shape[0], k, r))
+            del xq
+            x_dp = torch.matmul(x.unsqueeze(0), dp).permute(1, 0, 2)
+            out.add_(-x_dp.matmul(q.T))
+            del x_dp
             xp = x @ p
-            out = (
-                out
-                + x_dq.matmul(p.T)
-                + xq.matmul(dp.reshape(k * r, s).T).reshape(x.shape[0], k, r)
-                - x_dp.matmul(q.T)
-                - xp.matmul(dq.reshape(k * r, s).T).reshape(x.shape[0], k, r)
-            )
+            out.add_(-xp.matmul(dq.reshape(k * r, s).T).reshape(x.shape[0], k, r))
         return out
     raise TypeError(f"unsupported linear type {type(linear)!r}")
 
@@ -374,7 +384,7 @@ def _linear_tangent_batched(
 ) -> torch.Tensor:
     n, k, r = x_dot.shape
     state_part = dynamics.linear(x_dot.reshape(n * k, r)).reshape(n, k, r)
-    return state_part + _linear_param_action_batched(dynamics, x, directions, stack_cache=stack_cache)
+    return _linear_param_action_batched(dynamics, x, directions, stack_cache=stack_cache, out=state_part)
 
 
 def _source_param_action_batched(
@@ -646,7 +656,10 @@ def _quadratic_frozen_param_action_batched(
         + _energy_tucker_left_apply(c, dz_lag, z)
         + _energy_tucker_right_apply(c, z_lag, dz)
     )
-    return _back_project_energy_tangent(reduced_dot, p) + _back_project_energy_param_tangent(reduced, dp)
+    out = _back_project_energy_tangent(reduced_dot, p)
+    del reduced_dot
+    out.add_(_back_project_energy_param_tangent(reduced, dp))
+    return out
 
 
 def _frozen_action_ell_dot(dynamics: QuadraticDynamics, ell_dot: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
@@ -703,7 +716,10 @@ def _energy_tucker_frozen_tangent_batched(
         reduced = torch.bmm(_energy_tucker_reduced_matrix(c, z_ell), z_x.unsqueeze(-1)).squeeze(-1)
     else:
         reduced = torch.bmm(reduced_matrix, z_x.unsqueeze(-1)).squeeze(-1)
-    return _back_project_energy_tangent(reduced_dot, p) + _back_project_energy_param_tangent(reduced, dp)
+    out = _back_project_energy_tangent(reduced_dot, p)
+    del reduced_dot
+    out.add_(_back_project_energy_param_tangent(reduced, dp))
+    return out
 
 
 def _quadratic_frozen_tangent_batched(
